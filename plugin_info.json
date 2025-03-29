@@ -1,0 +1,7 @@
+{
+  "name": "mr_job_queue",
+  "version": "1.0.0",
+  "description": "Simple file-based job queue for running agent tasks asynchronously",
+  "services": ["start_worker", "submit_job", "process_job"],
+  "commands": ["submit_job", "get_job_status", "get_jobs", "cancel_job", "cleanup_jobs"]
+}
