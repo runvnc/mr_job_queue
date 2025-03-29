@@ -519,7 +519,7 @@ async def ensure_worker_running():
     await start_worker()
 
 @hook()
-async def startup(context=None):
+async def startup(app, context=None):
     """Start the worker when the plugin starts"""
     asyncio.create_task(enable_worker_running())
     return {"status": "Worker initialized"}
