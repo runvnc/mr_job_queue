@@ -24,7 +24,7 @@ async def index(request: Request, user=Depends(require_user)):
 async def list_jobs(request: Request, status: str = None, job_type: str = None, limit: int = 50, user=Depends(require_user)):
     """Get a list of jobs with optional filtering"""
     try:
-        jobs = await get_jobs(status=status, job_type=job_type, limit=limit, context=request.state.context)
+        jobs = await get_jobs(status=status, job_type=job_type, limit=limit)
         return JSONResponse(jobs)
     except Exception as e:
         print(e)
@@ -65,7 +65,7 @@ async def create_job(request: Request, user=Depends(require_user)):
 async def delete_job(request: Request, job_id: str, user=Depends(require_user)):
     """Cancel a job"""
     try:
-        result = await cancel_job(job_id, context=request.state.context)
+        result = await cancel_job(job_id)
         if "error" in result:
             return JSONResponse({"error": result["error"]}, status_code=404)
         return JSONResponse(result)
