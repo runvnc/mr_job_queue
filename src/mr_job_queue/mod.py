@@ -162,7 +162,7 @@ async def add_job(instructions, agent_name, job_type=None, metadata=None, contex
         "id": job_id,
         "agent_name": agent_name,
         "instructions": instructions,
-        "username": context.username if context else "system",
+        "username": "system",
         "status": "queued",
         "created_at": datetime.now().isoformat(),
         "updated_at": datetime.now().isoformat(),
