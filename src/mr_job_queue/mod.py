@@ -369,8 +369,8 @@ async def process_job(job_id, job_data):
             instructions=job_data["instructions"],
             agent_name=job_data["agent_name"],
             user=job_data["username"],
-            log_id=None,  # Let the service generate a log_id
-            retries=3
+            retries=3,
+            context=None
         )
         
         print(f"Task completed for job {job_id}, log_id: {log_id}")
