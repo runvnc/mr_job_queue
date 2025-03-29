@@ -12,6 +12,8 @@ import traceback
 import fcntl
 import aiofiles
 import aiofiles.os
+from lib.utils.debug import debug_box
+
 
 # Job directory structure
 JOB_DIR = "data/jobs"
@@ -152,6 +154,9 @@ async def add_job(instructions, agent_name, job_type=None, metadata=None, contex
     # Generate unique job ID
     job_id = f"job_{uuid.uuid4()}"
     
+    debug_box("add_job")
+    debug_box(instructions)
+
     # Create job data
     job_data = {
         "id": job_id,
