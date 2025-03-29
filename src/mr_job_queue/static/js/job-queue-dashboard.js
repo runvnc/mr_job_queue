@@ -148,7 +148,7 @@ class JobQueueDashboard extends BaseEl {
     
     try {
       // Load stats
-      const statsResponse = await fetch('/mr_job_queue/api/stats');
+      const statsResponse = await fetch('/api/stats');
       if (statsResponse.ok) {
         this.stats = await statsResponse.json();
       } else {
@@ -161,7 +161,7 @@ class JobQueueDashboard extends BaseEl {
       if (this.statusFilter) queryParams.append('status', this.statusFilter);
       if (this.jobTypeFilter) queryParams.append('job_type', this.jobTypeFilter);
       
-      const jobsResponse = await fetch(`/mr_job_queue/api/jobs?${queryParams}`);
+      const jobsResponse = await fetch(`/api/jobs?${queryParams}`);
       if (jobsResponse.ok) {
         this.jobs = await jobsResponse.json();
       } else {
@@ -193,7 +193,7 @@ class JobQueueDashboard extends BaseEl {
 
   async handleViewJob(jobId) {
     try {
-      const response = await fetch(`/mr_job_queue/api/jobs/${jobId}`);
+      const response = await fetch(`/api/jobs/${jobId}`);
       if (response.ok) {
         this.selectedJob = await response.json();
         this.showJobDetail = true;
@@ -214,7 +214,7 @@ class JobQueueDashboard extends BaseEl {
     }
     
     try {
-      const response = await fetch(`/mr_job_queue/api/jobs/${jobId}`, {
+      const response = await fetch(`/api/jobs/${jobId}`, {
         method: 'DELETE'
       });
       
