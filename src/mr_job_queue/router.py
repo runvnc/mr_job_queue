@@ -27,6 +27,7 @@ async def list_jobs(request: Request, status: str = None, job_type: str = None, 
         jobs = await get_jobs(status=status, job_type=job_type, limit=limit, context=request.state.context)
         return JSONResponse(jobs)
     except Exception as e:
+        print(e)
         return JSONResponse({"error": str(e)}, status_code=500)
 
 @router.get("/api/jobs/{job_id}")
