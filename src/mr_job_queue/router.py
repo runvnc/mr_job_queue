@@ -11,7 +11,7 @@ from .mod import (
 
 router = APIRouter()
 
-@router.get("/", include_in_schema=False)
+@router.get("/jobs", include_in_schema=False)
 async def index(request: Request, user=Depends(require_user)):
     """Job queue dashboard page"""
     try:
