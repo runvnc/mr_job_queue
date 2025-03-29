@@ -128,8 +128,7 @@ async def submit_job(instructions, agent_name, job_type=None, metadata=None, con
         job_id: ID of the submitted job
     """
     # Get the service and delegate
-    add_job_service = await service_manager.get_service("add_job")
-    return await add_job_service(
+    return await service_manager.add_job(
         instructions=instructions,
         agent_name=agent_name, 
         job_type=job_type, 
@@ -365,11 +364,8 @@ async def process_job(job_id, job_data):
         # Update index
         await update_job_index(job_id, "active")
         
-        # Run the task using run_task service
-        run_task = await service_manager.get_service("run_task")
-        
         print(f"Running task for job {job_id} with agent {job_data['agent_name']}")
-        text, full_results, log_id = await run_task(
+        text, full_results, log_id = await service_manager.run_task(
             instructions=job_data["instructions"],
             agent_name=job_data["agent_name"],
             user=job_data["username"],
