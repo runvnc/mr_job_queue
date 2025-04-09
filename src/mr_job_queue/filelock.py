@@ -1,4 +1,3 @@
-START_RAW
 import aiofiles
 import aiofiles.os
 import fcntl
@@ -29,4 +28,3 @@ class FileLock:
                 await aiofiles.os.remove(f"{self.file_path}.lock")
             except:
                 pass
-END_RAW
