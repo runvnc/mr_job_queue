@@ -4,10 +4,12 @@ from lib.templates import render
 from lib.auth.auth import require_user
 import os
 import json
-from .main import (
-    submit_job, get_job_status, get_jobs, cancel_job, cleanup_jobs,
+from .mod import (
+    get_job_status, get_jobs, cancel_job, cleanup_jobs,
     QUEUED_DIR, ACTIVE_DIR, COMPLETED_DIR, FAILED_DIR
 )
+
+from .main import add_job
 
 router = APIRouter()
 
@@ -49,7 +51,7 @@ async def create_job(request: Request, user=Depends(require_user)):
         if not all(k in data for k in ["instructions", "agent_name"]):
             return JSONResponse({"error": "Missing required fields"}, status_code=400)
         
-        result = await submit_job(
+        result = await add_job(
             instructions=data["instructions"],
             agent_name=data["agent_name"],
             job_type=data.get("job_type"),
