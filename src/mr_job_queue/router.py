@@ -4,7 +4,7 @@ from lib.templates import render
 from lib.auth.auth import require_user
 import os
 import json
-from .mod import (
+from .main import (
     submit_job, get_job_status, get_jobs, cancel_job, cleanup_jobs,
     QUEUED_DIR, ACTIVE_DIR, COMPLETED_DIR, FAILED_DIR
 )

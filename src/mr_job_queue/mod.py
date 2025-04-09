@@ -31,7 +31,9 @@ os.makedirs(FAILED_DIR, exist_ok=True)
 
 # Worker process state
 worker_task = None
-worker_running = False
+worker_running = asyncio.Event() # Use Event for clearer start/stop signaling
+semaphore = None
+active_job_tasks = set()
 
 # File locking helper
 class FileLock:
@@ -115,7 +117,7 @@ async def get_job_data(job_id):
 
 # Commands (for LLM agents)
 @command()
-async def submit_job(instructions, agent_name, job_type=None, metadata=None, context=None):
+async def submit_job(instructions, agent_name, job_type=None, job_id=None, metadata=None, context=None):
     """Submit a job to be processed by an agent.
     
     Args:
@@ -131,14 +133,15 @@ async def submit_job(instructions, agent_name, job_type=None, metadata=None, con
     return await service_manager.add_job(
         instructions=instructions,
         agent_name=agent_name, 
-        job_type=job_type, 
+        job_type=job_type,
+        job_id=job_id,
         metadata=metadata, 
         context=context
     )
 
 # Services (for plugin-to-plugin integration)
 @service()
-async def add_job(instructions, agent_name, job_type=None, metadata=None, context=None):
+async def add_job(instructions, agent_name, job_type=None, metadata=None, job_id=None, context=None):
     """Submit a job to be processed by an agent (service for plugin-to-plugin integration).
     
     Args:
@@ -146,22 +149,25 @@ async def add_job(instructions, agent_name, job_type=None, metadata=None, contex
         agent_name: Name of the agent to process this job
         job_type: Optional category/type of job
         metadata: Optional additional data for the job
+        job_id: Optional, otherwise will be random ID
     
     Returns:
         job_id: ID of the submitted job
     """
-    # Generate unique job ID
-    job_id = f"job_{uuid.uuid4()}"
+
+    if job_id is None:
+        job_id = f"job_{uuid.uuid4()}"
     
+
     debug_box("add_job")
     debug_box(instructions)
-
+    
     # Create job data
     job_data = {
         "id": job_id,
         "agent_name": agent_name,
         "instructions": instructions,
-        "username": "system",
+        "username": context.username,
         "status": "queued",
         "created_at": datetime.now().isoformat(),
         "updated_at": datetime.now().isoformat(),
@@ -370,6 +376,7 @@ async def process_job(job_id, job_data):
             agent_name=job_data["agent_name"],
             user=job_data["username"],
             retries=3,
+            log_id=job_id,
             context=None
         )
         
@@ -500,11 +507,15 @@ async def worker_loop():
 @service()
 async def start_worker():
     """Start the job queue worker process"""
-    global worker_task, worker_running
+    global worker_task, worker_running, semaphore
     
     if worker_task and not worker_task.done():
         return {"status": "Worker already running"}
     
+    # Initialize semaphore if not already done
+    if not semaphore:
+        semaphore = asyncio.Semaphore(MAX_CONCURRENT_JOBS)
+        
     # Start the worker in a background task
     worker_task = asyncio.create_task(worker_loop())
     
@@ -512,7 +523,7 @@ async def start_worker():
 
 async def ensure_worker_running():
     """Ensure the worker is running, start it if not"""
-    global worker_task, worker_running
+    global worker_task, worker_running, semaphore
     
     if worker_task and not worker_task.done():
         return
