@@ -84,7 +84,7 @@ async def add_job(instructions, agent_name, job_type=None, metadata=None, job_id
         "job_type": job_type,
         "result": None,
         "error": None,
-        "log_id": None,
+        "log_id": job_id,
         "metadata": metadata or {}
     }
     
