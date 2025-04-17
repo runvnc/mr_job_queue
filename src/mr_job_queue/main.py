@@ -158,7 +158,7 @@ async def process_job(job_id, job_data):
         text, full_results, log_id = await service_manager.run_task(
             instructions=job_data["instructions"],
             agent_name=job_data["agent_name"],
-            user=job_data["username"],
+            user= 'admin', #job_data["username"],
             retries=3,
             log_id=job_id, # Use job_id as log_id for correlation
             context=None # Pass context if needed by run_task
