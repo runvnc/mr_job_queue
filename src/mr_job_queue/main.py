@@ -46,7 +46,7 @@ active_job_tasks = set()
 
 # Services (for plugin-to-plugin integration)
 @service()
-async def add_job(instructions, agent_name, job_type=None, metadata=None, job_id=None, context=None):
+async def add_job(instructions, agent_name, job_type=None, username=None, metadata=None, job_id=None, context=None):
     """Submit a job to be processed by an agent (service for plugin-to-plugin integration).
     
     Args:
@@ -64,7 +64,7 @@ async def add_job(instructions, agent_name, job_type=None, metadata=None, job_id
     if job_id is None:
         job_id = f"job_{uuid.uuid4()}"
     
-    username = getattr(context, 'username', 'system') # Get username safely
+    username = getattr(context, 'username', 'adminclaims') # Get username safely
 
     debug_box(f"add_job called by {username}")
     # debug_box(instructions) # Potentially very long
