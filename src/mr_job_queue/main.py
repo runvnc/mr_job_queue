@@ -63,8 +63,9 @@ async def add_job(instructions, agent_name, job_type=None, username=None, metada
 
     if job_id is None:
         job_id = f"job_{uuid.uuid4()}"
-    
-    username = getattr(context, 'username', 'adminclaims') # Get username safely
+  
+    if username is None:
+        username = getattr(context, 'username', 'system')
 
     debug_box(f"add_job called by {username}")
     # debug_box(instructions) # Potentially very long
