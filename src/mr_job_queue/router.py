@@ -3,12 +3,14 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from lib.templates import render
 from lib.auth.auth import require_user
 import os
+import aiofiles
+import aiofiles.os
 import json
-from .mod import (
+from .commands import (
     get_job_status, get_jobs, cancel_job, cleanup_jobs,
     QUEUED_DIR, ACTIVE_DIR, COMPLETED_DIR, FAILED_DIR
 )
-
+# Assuming main still provides add_job service
 from .main import add_job
 
 router = APIRouter()
@@ -26,7 +28,7 @@ async def index(request: Request, user=Depends(require_user)):
 async def list_jobs(request: Request, status: str = None, job_type: str = None, limit: int = 50, user=Depends(require_user)):
     """Get a list of jobs with optional filtering"""
     try:
-        jobs = await get_jobs(status=status, job_type=job_type, limit=limit)
+        jobs = await get_jobs(status=status, job_type=job_type, username=user.username, limit=limit, context=request.state.context)
         return JSONResponse(jobs)
     except Exception as e:
         print(e)
@@ -49,16 +51,19 @@ async def create_job(request: Request, user=Depends(require_user)):
     try:
         data = await request.json()
         if not all(k in data for k in ["instructions", "agent_name"]):
-            return JSONResponse({"error": "Missing required fields"}, status_code=400)
+            raise HTTPException(status_code=400, detail="Missing required fields: instructions, agent_name")
         
         result = await add_job(
             instructions=data["instructions"],
             agent_name=data["agent_name"],
             job_type=data.get("job_type"),
             metadata=data.get("metadata"),
+            username=user.username, # Pass username from authenticated user
             context=request.state.context
         )
         
+        if "error" in result:
+            raise HTTPException(status_code=500, detail=result["error"])
         return JSONResponse(result)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
@@ -67,7 +72,7 @@ async def create_job(request: Request, user=Depends(require_user)):
 async def delete_job(request: Request, job_id: str, user=Depends(require_user)):
     """Cancel a job"""
     try:
-        result = await cancel_job(job_id)
+        result = await cancel_job(job_id, context=request.state.context)
         if "error" in result:
             return JSONResponse({"error": result["error"]}, status_code=404)
         return JSONResponse(result)
@@ -100,18 +105,27 @@ async def cleanup(request: Request, user=Depends(require_user)):
 async def get_stats(request: Request, user=Depends(require_user)):
     """Get job queue statistics"""
     try:
-        # Count jobs in each directory
-        queued_count = len([f for f in os.listdir(QUEUED_DIR) if f.endswith('.json')])
-        active_count = len([f for f in os.listdir(ACTIVE_DIR) if f.endswith('.json')])
-        completed_count = len([f for f in os.listdir(COMPLETED_DIR) if f.endswith('.json')])
-        failed_count = len([f for f in os.listdir(FAILED_DIR) if f.endswith('.json')])
+        counts = {}
+        for status_name, status_dir in [
+            ("queued", QUEUED_DIR),
+            ("active", ACTIVE_DIR),
+            ("completed", COMPLETED_DIR),
+            ("failed", FAILED_DIR)
+        ]:
+            if not await aiofiles.os.path.isdir(status_dir):
+                await aiofiles.os.makedirs(status_dir, exist_ok=True)
+            try:
+                files = await aiofiles.os.listdir(status_dir)
+                counts[status_name] = len([f for f in files if f.endswith('.json')])
+            except FileNotFoundError:
+                counts[status_name] = 0 # Should not happen if makedirs worked
         
         stats = {
-            "queued": queued_count,
-            "active": active_count,
-            "completed": completed_count,
-            "failed": failed_count,
-            "total": queued_count + active_count + completed_count + failed_count
+            "queued": counts.get("queued", 0),
+            "active": counts.get("active", 0),
+            "completed": counts.get("completed", 0),
+            "failed": counts.get("failed", 0),
+            "total": sum(counts.values())
         }
         
         return JSONResponse(stats)

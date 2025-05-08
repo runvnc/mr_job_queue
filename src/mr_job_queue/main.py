@@ -262,10 +262,28 @@ async def worker_loop():
     
     while worker_running.is_set():
         queued_jobs_files = []
+        job_files_with_mtime = []
         try:
             # Get list of queued jobs
-            queued_jobs_files = [f for f in await aiofiles.os.listdir(QUEUED_DIR) if f.endswith('.json')]
+            raw_files = await aiofiles.os.listdir(QUEUED_DIR)
+            for job_file in raw_files:
+                if job_file.endswith('.json'):
+                    full_path = os.path.join(QUEUED_DIR, job_file)
+                    try:
+                        stat_result = await aiofiles.os.stat(full_path)
+                        job_files_with_mtime.append((stat_result.st_mtime, job_file))
+                    except FileNotFoundError:
+                        # File might have been processed/moved since listdir
+                        print(f"Warning: File {full_path} not found during mtime check.")
+                        continue
+                    except Exception as e_stat:
+                        print(f"Warning: Could not stat file {full_path}: {e_stat}")
+                        continue
             
+            # Sort jobs by modification time (oldest first)
+            job_files_with_mtime.sort(key=lambda x: x[0])
+            queued_jobs_files = [job_file for _, job_file in job_files_with_mtime]
+
             if not queued_jobs_files:
                 # No jobs to process, wait before checking again
                 await asyncio.sleep(5) 

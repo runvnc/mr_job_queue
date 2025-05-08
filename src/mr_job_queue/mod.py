@@ -1,3 +1,17 @@
+# This file appears to contain redundant code.
+# Key functionalities have been moved to dedicated files:
+# - FileLock -> filelock.py
+# - Helper functions (update_job_index, get_job_data) -> helpers.py
+# - Commands (get_job_status, etc.) -> commands.py
+#
+# main.py, commands.py, and router.py (after recent updates) now source these
+# functionalities from their respective dedicated files or via __init__.py.
+#
+# This file can likely be removed or significantly reduced.
+# For now, commenting out its contents to prevent accidental usage
+# and to test if the plugin operates correctly without it.
+
+"""
 from lib.providers.commands import command
 from lib.providers.services import service, service_manager
 from lib.providers.hooks import hook
@@ -256,4 +270,4 @@ async def cleanup_jobs(status="completed", older_than_days=30, context=None):
     
     return {"removed_count": removed_count}
 
-
+"""
