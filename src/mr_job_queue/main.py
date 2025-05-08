@@ -128,7 +128,7 @@ async def add_job(instructions, agent_name, job_type=None, username=None, metada
                     "created_at": job_data["created_at"],
                     "username": job_data["username"]
                 }
-                if prefix_with_newline:
+                if add_newline:
                     await f.write("\n")
                 await f.write(json.dumps(index_entry) + "\n")
     except Exception as e:
