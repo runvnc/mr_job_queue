@@ -27,9 +27,9 @@ JOB_INDEX = f"{JOB_DIR}/job_index.jsonl"
 
 # Concurrency settings - Read from environment variable
 try:
-    MAX_CONCURRENT_JOBS = int(os.getenv('JOB_QUEUE_MAX_CONCURRENT', '5'))
+    MAX_CONCURRENT_JOBS = int(os.getenv('JOB_QUEUE_MAX_CONCURRENT', '1'))
 except ValueError:
-    print("Warning: Invalid value for JOB_QUEUE_MAX_CONCURRENT env var, defaulting to 5.")
+    print("Warning: Invalid value for JOB_QUEUE_MAX_CONCURRENT env var, defaulting to 1.")
     MAX_CONCURRENT_JOBS = 5
 
 # Ensure directories exist
@@ -111,6 +111,14 @@ async def add_job(instructions, agent_name, job_type=None, username=None, metada
 
     try:
         async with FileLock(JOB_INDEX):
+
+            # first make sure if there is text in the file that it already ends in a newline
+            add_newline = False
+            async with aiofiles.open(JOB_INDEX, "rb") as f:
+                last_char = await f.read(1)
+                if last_char != b'\n':
+                    add_newline = True
+
             async with aiofiles.open(JOB_INDEX, "a") as f:
                 index_entry = {
                     "id": job_id,
@@ -120,8 +128,9 @@ async def add_job(instructions, agent_name, job_type=None, username=None, metada
                     "created_at": job_data["created_at"],
                     "username": job_data["username"]
                 }
-                await f.write(json.dumps(index_entry) + "\
-")
+                if add_newline:
+                    await f.write("\n")
+                await f.write(json.dumps(index_entry) + "\n")
     except Exception as e:
         print(f"Error appending to job index {JOB_INDEX}: {e}")
         # Job file created, but index update failed. Log and continue.

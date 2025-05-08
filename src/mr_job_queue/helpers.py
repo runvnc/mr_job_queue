@@ -3,6 +3,8 @@ import json
 import aiofiles
 import aiofiles.os
 from datetime import datetime
+# need to be able to exit process immediately
+import sys
 
 from .filelock import FileLock
 
@@ -71,8 +73,7 @@ async def update_job_index(job_id, new_status):
             # Write the updated entries to the temporary file
             async with aiofiles.open(temp_index, "w") as f_out:
                 for entry in entries_to_keep:
-                    await f_out.write(json.dumps(entry) + "\
-")
+                    await f_out.write(json.dumps(entry) + "\n")
 
             # Replace original with updated index atomically
             await aiofiles.os.rename(temp_index, JOB_INDEX)
