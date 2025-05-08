@@ -28,7 +28,13 @@ async def index(request: Request, user=Depends(require_user)):
 async def list_jobs(request: Request, status: str = None, job_type: str = None, limit: int = 50, user=Depends(require_user)):
     """Get a list of jobs with optional filtering"""
     try:
-        jobs = await get_jobs(status=status, job_type=job_type, username=user.username, limit=limit, context=request.state.context)
+        # Get context if available, otherwise pass None
+        context = None
+        if hasattr(request.state, 'context'):
+            context = request.state.context
+        
+        # Call get_jobs with appropriate parameters
+        jobs = await get_jobs(status=status, job_type=job_type, username=user.username, limit=limit, context=context)
         return JSONResponse(jobs)
     except Exception as e:
         print(e)
@@ -38,7 +44,12 @@ async def list_jobs(request: Request, status: str = None, job_type: str = None, 
 async def get_job(request: Request, job_id: str, user=Depends(require_user)):
     """Get details for a specific job"""
     try:
-        job = await get_job_status(job_id, context=request.state.context)
+        # Get context if available, otherwise pass None
+        context = None
+        if hasattr(request.state, 'context'):
+            context = request.state.context
+            
+        job = await get_job_status(job_id, context=context)
         if "error" in job:
             return JSONResponse({"error": job["error"]}, status_code=404)
         return JSONResponse(job)
@@ -53,13 +64,18 @@ async def create_job(request: Request, user=Depends(require_user)):
         if not all(k in data for k in ["instructions", "agent_name"]):
             raise HTTPException(status_code=400, detail="Missing required fields: instructions, agent_name")
         
+        # Get context if available, otherwise pass None
+        context = None
+        if hasattr(request.state, 'context'):
+            context = request.state.context
+            
         result = await add_job(
             instructions=data["instructions"],
             agent_name=data["agent_name"],
             job_type=data.get("job_type"),
             metadata=data.get("metadata"),
             username=user.username, # Pass username from authenticated user
-            context=request.state.context
+            context=context
         )
         
         if "error" in result:
@@ -72,7 +88,12 @@ async def create_job(request: Request, user=Depends(require_user)):
 async def delete_job(request: Request, job_id: str, user=Depends(require_user)):
     """Cancel a job"""
     try:
-        result = await cancel_job(job_id, context=request.state.context)
+        # Get context if available, otherwise pass None
+        context = None
+        if hasattr(request.state, 'context'):
+            context = request.state.context
+            
+        result = await cancel_job(job_id, context=context)
         if "error" in result:
             return JSONResponse({"error": result["error"]}, status_code=404)
         return JSONResponse(result)
@@ -91,10 +112,15 @@ async def cleanup(request: Request, user=Depends(require_user)):
         status = data.get("status", "completed")
         older_than_days = data.get("older_than_days", 30)
         
+        # Get context if available, otherwise pass None
+        context = None
+        if hasattr(request.state, 'context'):
+            context = request.state.context
+            
         result = await cleanup_jobs(
             status=status,
             older_than_days=older_than_days,
-            context=request.state.context
+            context=context
         )
         
         return JSONResponse(result)
