@@ -46,7 +46,7 @@ active_job_tasks = set()
 
 # Services (for plugin-to-plugin integration)
 @service()
-async def add_job(instructions, agent_name, job_type=None, username=None, metadata=None, job_id=None, context=None):
+async def add_job(instructions, agent_name, job_type=None, username=None, metadata=None, job_id=None, llm=None, context=None):
     """Submit a job to be processed by an agent (service for plugin-to-plugin integration).
     
     Args:
@@ -84,6 +84,7 @@ async def add_job(instructions, agent_name, job_type=None, username=None, metada
         "plugin": job_type.split(".")[0] if job_type and "." in job_type else None,
         "job_type": job_type,
         "result": None,
+        "llm": llm,
         "error": None,
         "log_id": job_id,
         "metadata": metadata or {}
@@ -170,6 +171,7 @@ async def process_job(job_id, job_data):
             agent_name=job_data["agent_name"],
             user=job_data["username"],
             retries=3,
+            llm=job_data["llm"],
             log_id=job_id, # Use job_id as log_id for correlation
             context=None # Pass context if needed by run_task
         )
