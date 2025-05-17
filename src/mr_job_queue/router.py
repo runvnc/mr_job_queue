@@ -9,7 +9,8 @@ import json
 from .commands import (
     get_job_status, get_jobs, cancel_job, cleanup_jobs,
     QUEUED_DIR, ACTIVE_DIR, COMPLETED_DIR, FAILED_DIR
-)
+, DEFAULT_JOB_TYPE)
+from .helpers import sanitize_job_type
 # Assuming main still provides add_job service
 from .main import add_job
 
@@ -132,19 +133,51 @@ async def get_stats(request: Request, user=Depends(require_user)):
     """Get job queue statistics"""
     try:
         counts = {}
+        # Initialize counts for each status
+        for status in ["queued", "active", "completed", "failed"]:
+            counts[status] = 0
+            
         for status_name, status_dir in [
             ("queued", QUEUED_DIR),
             ("active", ACTIVE_DIR),
             ("completed", COMPLETED_DIR),
             ("failed", FAILED_DIR)
         ]:
-            if not await aiofiles.os.path.isdir(status_dir):
-                await aiofiles.os.makedirs(status_dir, exist_ok=True)
             try:
+                # Ensure directory exists
+                if not await aiofiles.os.path.isdir(status_dir):
+                    await aiofiles.os.makedirs(status_dir, exist_ok=True)
+                    
+                # Count files in the base directory (legacy jobs)
                 files = await aiofiles.os.listdir(status_dir)
-                counts[status_name] = len([f for f in files if f.endswith('.json')])
+                base_count = len([f for f in files if f.endswith('.json')])
+                counts[status_name] += base_count
+                
+                # Count files in job type subdirectories
+                for item in files:
+                    item_path = os.path.join(status_dir, item)
+                    if await aiofiles.os.path.isdir(item_path):
+                        try:
+                            # This is a job type directory
+                            type_files = await aiofiles.os.listdir(item_path)
+                            type_count = len([f for f in type_files if f.endswith('.json')])
+                            counts[status_name] += type_count
+                            
+                            # Optionally, track counts per job type
+                            original_job_type = item
+                            job_type = sanitize_job_type(original_job_type)
+                            type_key = f"{status_name}_{job_type}"
+                            counts[type_key] = type_count
+                        except Exception as e:
+                            print(f"Error counting files in {item_path}: {e}")
+                            # Continue with other directories
+                            continue
+                
             except FileNotFoundError:
                 counts[status_name] = 0 # Should not happen if makedirs worked
+            except Exception as e:
+                print(f"Error getting stats for {status_name}: {e}")
+                # Keep the count at 0 and continue
         
         stats = {
             "queued": counts.get("queued", 0),
@@ -152,8 +185,16 @@ async def get_stats(request: Request, user=Depends(require_user)):
             "completed": counts.get("completed", 0),
             "failed": counts.get("failed", 0),
             "total": sum(counts.values())
+            
+            # Include job type specific counts if available
+            # This will add entries like queued_default, active_default, etc.
         }
         
+        # Add job type specific counts to stats
+        for key, value in counts.items():
+            if key not in ["queued", "active", "completed", "failed"]:
+                stats[key] = value
+                
         return JSONResponse(stats)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)

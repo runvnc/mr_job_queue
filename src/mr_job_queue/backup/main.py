@@ -15,7 +15,7 @@ from lib.utils.debug import debug_box
 
 # Local imports
 from .filelock import FileLock
-from .helpers import get_job_data, update_job_index, sanitize_job_type
+from .helpers import get_job_data, update_job_index
 
 debug_box("----------------------------------- JOB_QUEUE STARTING ----------------------------------------------------")
 
@@ -35,7 +35,6 @@ except ValueError:
     print("Warning: Invalid value for JOB_QUEUE_MAX_CONCURRENT env var, defaulting to 5.")
     MAX_CONCURRENT_JOBS = 5
 
-
 # Concurrency settings per job type - Read from environment variable
 try:
     MAX_CONCURRENT_PER_TYPE = int(os.getenv('JOB_QUEUE_MAX_CONCURRENT_PER_TYPE', '1'))
@@ -48,6 +47,7 @@ os.makedirs(QUEUED_DIR, exist_ok=True)
 os.makedirs(ACTIVE_DIR, exist_ok=True)
 os.makedirs(COMPLETED_DIR, exist_ok=True)
 os.makedirs(FAILED_DIR, exist_ok=True)
+
 # Worker process state
 worker_task = None
 worker_running = asyncio.Event() # Use Event for clearer start/stop signaling
@@ -55,7 +55,6 @@ semaphore = None
 active_job_tasks = set()
 # Dictionary to store semaphores for each job type
 job_type_semaphores = {}
-# Dictionary to store tasks for each job type
 job_type_tasks = {}
 
 # Services (for plugin-to-plugin integration)
@@ -82,8 +81,7 @@ async def add_job(instructions, agent_name, job_type=None, username=None, metada
         username = getattr(context, 'username', 'system')
 
     # Ensure job_type is not None for directory structure
-    original_job_type = job_type or DEFAULT_JOB_TYPE
-    job_type = sanitize_job_type(original_job_type)
+    job_type = job_type or DEFAULT_JOB_TYPE
 
     debug_box(f"add_job called by {username}")
     # debug_box(instructions) # Potentially very long
@@ -100,16 +98,13 @@ async def add_job(instructions, agent_name, job_type=None, username=None, metada
         "started_at": None,
         "completed_at": None,
         "plugin": job_type.split(".")[0] if job_type and "." in job_type else None,
-        "job_type": original_job_type,  # Store original job_type in metadata
+        "job_type": job_type,
         "result": None,
         "llm": llm,
         "error": None,
         "log_id": job_id,
         "metadata": metadata or {}
     }
-    
-    # Add sanitized_job_type to metadata for reference
-    job_data["metadata"]["sanitized_job_type"] = job_type
     
     # Create job_type directories if they don't exist
     queued_job_type_dir = f"{QUEUED_DIR}/{job_type}"
@@ -177,7 +172,7 @@ async def add_job(instructions, agent_name, job_type=None, username=None, metada
         # Job file created, but index update failed. Log and continue.
 
     # Ensure worker is running (non-blocking)
-    asyncio.create_task(start_job_type_workers())
+    asyncio.create_task(ensure_worker_running())
     
     # Ensure job type worker is running (non-blocking)
     asyncio.create_task(ensure_job_type_worker_running(job_type))
@@ -187,8 +182,7 @@ async def add_job(instructions, agent_name, job_type=None, username=None, metada
 @service()
 async def process_job(job_id, job_data, job_type=None):
     """Process a single job using the run_task service"""
-    original_job_type = job_type or job_data.get("job_type", DEFAULT_JOB_TYPE)
-    job_type = sanitize_job_type(original_job_type)
+    job_type = job_type or job_data.get("job_type", DEFAULT_JOB_TYPE)
     active_path = f"{ACTIVE_DIR}/{job_type}/{job_id}.json"
     try:
         print(f"Processing job {job_id}")
@@ -303,6 +297,7 @@ async def run_job_and_release(job_id, job_data, sem, job_type=None):
         print(f"Releasing semaphore for job {job_id}")
         sem.release()
 
+# --- End of first half ---
 
 async def job_type_worker_loop(job_type):
     """Worker loop for a specific job type."""
@@ -473,7 +468,6 @@ async def job_type_worker_loop(job_type):
     
     print(f"Job queue worker loop for type {job_type} finished.")
 
-@service()
 async def ensure_job_type_worker_running(job_type):
     """Ensure a worker for a specific job type is running."""
     global job_type_tasks, worker_running
@@ -482,8 +476,6 @@ async def ensure_job_type_worker_running(job_type):
     if not worker_running.is_set():
         print(f"Main worker not running, not starting job type worker for {job_type}")
         return
-        
-    job_type = sanitize_job_type(job_type)
     
     # Check if a task for this job type already exists and is running
     if job_type in job_type_tasks and not job_type_tasks[job_type].done():
@@ -503,7 +495,6 @@ async def start_job_type_workers():
             for job_type_dir in dirs:
                 job_type_path = os.path.join(QUEUED_DIR, job_type_dir)
                 if await aiofiles.os.path.isdir(job_type_path):
-                    job_type_dir = sanitize_job_type(job_type_dir)
                     # This is a job type directory, start a worker for it
                     await ensure_job_type_worker_running(job_type_dir)
     except Exception as e:
@@ -511,12 +502,163 @@ async def start_job_type_workers():
         print(traceback.format_exc())
 
     # Also check for the default job type
-    await ensure_job_type_worker_running(sanitize_job_type(DEFAULT_JOB_TYPE))
+    await ensure_job_type_worker_running(DEFAULT_JOB_TYPE)
 
-async def check_job_type_directories():
-    """Check for job type directories and ensure workers are running for them."""
+async def worker_loop():
+    """Main worker loop that processes queued jobs concurrently up to a limit."""
+    global worker_running
+    global semaphore
+    global active_job_tasks
+    global job_type_tasks
+    
+    if not semaphore:
+        print("Error: Worker loop started before semaphore was initialized!")
+        return
+    
+    print(f"Job queue worker started (Max Concurrent: {MAX_CONCURRENT_JOBS})")
+    
+    # Start job type workers for existing directories
     await start_job_type_workers()
+    
+    while worker_running.is_set():
+        queued_jobs_files = []
+        job_files_with_mtime = []
+        try:
+            # Get list of queued jobs
+            raw_files = await aiofiles.os.listdir(QUEUED_DIR)
+            
+            # Check for job type directories and ensure workers are running for them
+            for item in raw_files:
+                item_path = os.path.join(QUEUED_DIR, item)
+                try:
+                    if await aiofiles.os.path.isdir(item_path):
+                        # This is a job type directory, ensure worker is running
+                        await ensure_job_type_worker_running(item)
+                except Exception as dir_e:
+                    print(f"Error checking directory {item_path}: {dir_e}")
+                    continue
+            
+            # Process legacy jobs (directly in QUEUED_DIR, not in a job_type subdir)
+            for job_file in raw_files:
+                if job_file.endswith('.json'):
+                    full_path = os.path.join(QUEUED_DIR, job_file)
+                    try:
+                        stat_result = await aiofiles.os.stat(full_path)
+                        job_files_with_mtime.append((stat_result.st_mtime, job_file))
+                    except FileNotFoundError:
+                        # File might have been processed/moved since listdir
+                        print(f"Warning: File {full_path} not found during mtime check.")
+                        continue
+                    except Exception as e_stat:
+                        print(f"Warning: Could not stat file {full_path}: {e_stat}")
+                        continue
+            
+            # Sort jobs by modification time (oldest first)
+            job_files_with_mtime.sort(key=lambda x: x[0])
+            queued_jobs_files = [job_file for _, job_file in job_files_with_mtime]
 
+            if not queued_jobs_files:
+                # No jobs to process, wait before checking again
+                await asyncio.sleep(5) 
+                continue
+            
+            # Try to acquire semaphore and launch jobs
+            for job_file in queued_jobs_files:
+                if not worker_running.is_set():
+                    print("Worker loop stopping signal received.")
+                    break # Exit inner loop if stop signal received
+                    
+                job_path = f"{QUEUED_DIR}/{job_file}"
+                job_id = job_file.replace(".json", "")
+                
+                # Try to acquire semaphore without blocking the entire loop indefinitely
+                print(f"Attempting to acquire semaphore for job {job_id}... ({semaphore._value} available)")
+                await semaphore.acquire()
+                print(f"Semaphore acquired for job {job_id}")
+
+                # Double-check worker status after acquiring semaphore
+                if not worker_running.is_set():
+                    print("Worker stopped after acquiring semaphore, releasing.")
+                    semaphore.release()
+                    break # Exit inner loop
+
+                try:
+                    # Check if file still exists in QUEUED (might have been processed/cancelled)
+                    if not await aiofiles.os.path.exists(job_path):
+                        print(f"Job file {job_path} disappeared before moving, releasing semaphore.")
+                        semaphore.release()
+                        continue # Try next file
+
+                    # Move job file to active directory *before* launching task
+                    active_path = f"{ACTIVE_DIR}/{job_file}"
+                    try:
+                        await aiofiles.os.rename(job_path, active_path)
+                        print(f"Moved {job_id} to active directory")
+                    except Exception as move_error:
+                        print(f"Error moving job file {job_path} to {active_path}: {move_error}, releasing semaphore.")
+                        semaphore.release()
+                        continue # Try next file
+                    
+                    # Read job data *after* moving
+                    job_data = await get_job_data(job_id) # Should read from ACTIVE_DIR now
+                    if not job_data:
+                        print(f"Could not read job data for {job_id} from active dir, moving to failed.")
+                        # Attempt to move to failed state manually
+                        failed_path = f"{FAILED_DIR}/{job_id}.json"
+                        error_data = {"id": job_id, "status": "failed", "error": "Failed to read data after moving to active."}
+                        try:
+                            async with FileLock(failed_path):
+                                async with aiofiles.open(failed_path, "w") as f:
+                                    await f.write(json.dumps(error_data, indent=2))
+                            await update_job_index(job_id, "failed", DEFAULT_JOB_TYPE)  # Use default job type for legacy jobs
+                            print(f"Manually moved {job_id} of type {job_type} to failed state due to read error.")
+                        except Exception as fail_err:
+                            print(f"Error moving {job_id} to failed state after read error: {fail_err}")
+                        # Release semaphore even if manual move fails
+                        semaphore.release()
+                        continue # Try next file
+                    
+                    # Launch the job processing in the background
+                    print(f"Creating task for job {job_id}")
+                    task = asyncio.create_task(run_job_and_release(job_id, job_data, semaphore))
+                    active_job_tasks.add(task)
+                    # Remove task from set when done to prevent memory leak
+                    task.add_done_callback(active_job_tasks.discard)
+                    print(f"Task for {job_id} created and added to active set ({len(active_job_tasks)} total).")
+
+                except Exception as e:
+                    # Catch errors during the acquire/move/launch phase for a single job
+                    print(f"Error in worker loop processing job {job_file}: {e}")
+                    print(traceback.format_exc())
+                    # Ensure semaphore is released if an error occurred after acquiring it
+                    # Check if the semaphore is locked by the current task context (tricky)
+                    # A simple release might work if the error happened after acquire
+                    try:
+                        # This might raise ValueError if already released, hence the try/except
+                        semaphore.release()
+                        print(f"Semaphore released due to error during processing setup for {job_id}")
+                    except (ValueError, RuntimeError):
+                        # Already released or semaphore state issue, log it
+                        print(f"Note: Semaphore already released or state error during error handling for {job_id}")
+                        pass 
+                    # Continue to the next job file
+                    continue
+
+            # If loop finished, wait a bit before scanning again
+            await asyncio.sleep(1) # Shorter sleep when jobs were processed
+
+        except FileNotFoundError:
+            print(f"Queued directory {QUEUED_DIR} not found. Worker sleeping.")
+            await asyncio.sleep(15)
+        except Exception as e:
+            # Catch errors in the main worker loop (e.g., listing directory)
+            print(f"Worker loop encountered an error: {e}")
+            print(traceback.format_exc())
+            await asyncio.sleep(10)  # Longer sleep on major loop error
+    
+    print("Job queue worker loop finished.")
+
+@service()
 async def start_worker():
     """Start the job queue worker process if not already running."""
     global worker_task, worker_running, semaphore, MAX_CONCURRENT_JOBS
@@ -524,7 +666,7 @@ async def start_worker():
     if worker_task and not worker_task.done():
         print("Worker already running.")
         return {"status": "Worker already running"}
-
+    
     # Initialize semaphore if not already done (should be done at startup ideally)
     if not semaphore:
         print(f"Initializing semaphore with limit {MAX_CONCURRENT_JOBS}")
@@ -533,9 +675,9 @@ async def start_worker():
     # Set the running event before creating the task
     worker_running.set()
     
-    # Start job type workers instead of the old worker_loop
-    print("Starting job type workers.")
-    asyncio.create_task(start_job_type_workers())
+    # Start the worker in a background task
+    print("Creating worker loop task.")
+    worker_task = asyncio.create_task(worker_loop())
     
     return {"status": "Worker started"}
 
@@ -547,7 +689,7 @@ async def ensure_worker_running():
         # Task exists and is not finished, assume it's running or will run
         return
     
-    print("Worker task not found or finished, starting job type workers.")
+    print("Worker task not found or finished, ensuring worker starts.")
     await start_worker()
 
 @hook()
@@ -562,7 +704,7 @@ async def startup(app, context=None):
     # Signal worker loop that it's okay to run
     worker_running.set() 
     # Create the task to ensure it starts
-    asyncio.create_task(start_job_type_workers())
+    asyncio.create_task(ensure_worker_running())
     
     # Also start job type workers for existing directories
     asyncio.create_task(start_job_type_workers())

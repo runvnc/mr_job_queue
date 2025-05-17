@@ -13,12 +13,13 @@ JOB_DIR = "data/jobs"
 QUEUED_DIR = f"{JOB_DIR}/queued"
 ACTIVE_DIR = f"{JOB_DIR}/active"
 COMPLETED_DIR = f"{JOB_DIR}/completed"
+DEFAULT_JOB_TYPE = "default"  # Default job type for backward compatibility
 FAILED_DIR = f"{JOB_DIR}/failed"
 JOB_INDEX = f"{JOB_DIR}/job_index.jsonl"
 
 # Import necessary helpers (assuming they are moved to a helpers.py or main.py)
 # If they remain in mod.py (renamed to main.py), adjust the import
-from .helpers import get_job_data, update_job_index
+from .helpers import get_job_data, update_job_index, sanitize_job_type
 
 # Commands (for LLM agents)
 @command()
@@ -115,19 +116,33 @@ async def cancel_job(job_id, context=None):
     Returns:
         Success message or error
     """
-    job_path = f"{QUEUED_DIR}/{job_id}.json"
-    if not os.path.exists(job_path):
-        # Check if it's active maybe?
-        active_path = f"{ACTIVE_DIR}/{job_id}.json"
-        if os.path.exists(active_path):
-             return {"error": "Job is already active, cannot cancel via this command."}
-        return {"error": "Job not found in queued state."}
-    
     # Get job data first to ensure it exists and we can update it
     job_data = await get_job_data(job_id) # This should read from QUEUED_DIR
     if not job_data or job_data.get("status") != "queued":
         # If get_job_data found it elsewhere or status isn't queued, something is wrong
         return {"error": "Job not found or not in queued state (race condition?)"}
+    
+    # Get job type from job data
+    original_job_type = job_data.get("job_type", DEFAULT_JOB_TYPE)
+    job_type = sanitize_job_type(original_job_type)
+    
+    # Construct path to job file in the appropriate job_type directory
+    job_path = f"{QUEUED_DIR}/{job_type}/{job_id}.json"
+    
+    # Check if the job file exists in the job_type directory
+    if not await aiofiles.os.path.exists(job_path):
+        # If not found in job_type directory, check if it's in the root QUEUED_DIR (legacy)
+        legacy_job_path = f"{QUEUED_DIR}/{job_id}.json"
+        if await aiofiles.os.path.exists(legacy_job_path):
+            job_path = legacy_job_path
+        else:
+            # Check if it's active maybe?
+            active_path = f"{ACTIVE_DIR}/{job_type}/{job_id}.json"
+            legacy_active_path = f"{ACTIVE_DIR}/{job_id}.json"
+            
+            if await aiofiles.os.path.exists(active_path) or await aiofiles.os.path.exists(legacy_active_path):
+                return {"error": "Job is already active, cannot cancel via this command."}
+            return {"error": "Job not found in queued state."}
     
     # Update status and add error message
     job_data["status"] = "failed"
@@ -157,7 +172,7 @@ async def cancel_job(job_id, context=None):
         print(f"Warning: Failed to remove queued job file {job_path} during cancellation: {e}")
 
     # Update index
-    await update_job_index(job_id, "failed")
+    await update_job_index(job_id, "failed", original_job_type)
     
     return {"success": True, "job_id": job_id}
 
@@ -175,25 +190,61 @@ async def cleanup_jobs(status="completed", older_than_days=30, context=None):
     if status not in ["completed", "failed"]:
         return {"error": "Status must be 'completed' or 'failed'"}
     
-    status_dir = COMPLETED_DIR if status == "completed" else FAILED_DIR
+    base_status_dir = COMPLETED_DIR if status == "completed" else FAILED_DIR
     cutoff_time = datetime.now().timestamp() - (older_than_days * 24 * 60 * 60)
     removed_count = 0
     jobs_to_remove_from_index = []
 
     try:
-        job_files = await aiofiles.os.listdir(status_dir)
+        job_files = await aiofiles.os.listdir(base_status_dir)
     except FileNotFoundError:
-        print(f"Directory not found for cleanup: {status_dir}")
+        print(f"Directory not found for cleanup: {base_status_dir}")
         return {"removed_count": 0}
     except Exception as e:
-        print(f"Error listing directory {status_dir}: {e}")
-        return {"error": f"Failed to list directory {status_dir}"}
+        print(f"Error listing directory {base_status_dir}: {e}")
+        return {"error": f"Failed to list directory {base_status_dir}"}
 
     for job_file in job_files:
         if not job_file.endswith(".json"):
-            continue
+            job_type_name = sanitize_job_type(job_file)
+            # Check if it's a job type directory
+            if status == "completed":  # Only completed uses job type dirs
+                job_type_dir = os.path.join(base_status_dir, job_file)
+                if await aiofiles.os.path.isdir(job_type_dir):
+                    # Process files in this job type directory
+                    try:
+                        type_job_files = await aiofiles.os.listdir(job_type_dir)
+                        for type_job_file in type_job_files:
+                            if not type_job_file.endswith(".json"):
+                                continue
+                                
+                            job_path = f"{job_type_dir}/{type_job_file}"
+                            job_id = type_job_file.replace(".json", "")
+                            
+                            try:
+                                # Check file modification time
+                                stat_result = await aiofiles.os.stat(job_path)
+                                file_mtime = stat_result.st_mtime
+                                
+                                if file_mtime < cutoff_time:
+                                    # If old enough, remove it
+                                    print(f"Cleaning up job {job_id} from {job_type_dir}")
+                                    await aiofiles.os.remove(job_path)
+                                    jobs_to_remove_from_index.append((job_id, job_file))  # Use original job_type for index
+                                    removed_count += 1
+                            except FileNotFoundError:
+                                print(f"Job file {job_path} disappeared during cleanup scan.")
+                                continue
+                            except Exception as e:
+                                print(f"Error processing job {job_id} during cleanup: {e}")
+                                continue
+                    except Exception as e:
+                        print(f"Error listing job type directory {job_type_dir}: {e}")
+                        continue
+            continue  # Skip non-json files in the base directory
             
-        job_path = f"{status_dir}/{job_file}"
+        # Process files directly in the base directory (legacy or failed)
+        job_path = f"{base_status_dir}/{job_file}"
         job_id = job_file.replace(".json", "")
         
         try:
@@ -225,9 +276,9 @@ async def cleanup_jobs(status="completed", older_than_days=30, context=None):
                     should_remove = True
             
             if should_remove:
-                print(f"Cleaning up job {job_id} from {status_dir}")
+                print(f"Cleaning up job {job_id} from {base_status_dir}")
                 await aiofiles.os.remove(job_path)
-                jobs_to_remove_from_index.append(job_id)
+                jobs_to_remove_from_index.append((job_id, DEFAULT_JOB_TYPE))
                 removed_count += 1
 
         except FileNotFoundError:
@@ -243,8 +294,8 @@ async def cleanup_jobs(status="completed", older_than_days=30, context=None):
     # (Original code updated index inside the loop, which is less efficient)
     # This requires modifying update_job_index or creating a bulk version.
     # For simplicity, sticking to original logic for now:
-    for job_id_to_remove in jobs_to_remove_from_index:
-         await update_job_index(job_id_to_remove, "removed")
+    for job_id_to_remove, job_type in jobs_to_remove_from_index:
+         await update_job_index(job_id_to_remove, "removed", job_type)
 
     return {"removed_count": removed_count}
-
+ 

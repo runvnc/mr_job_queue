@@ -2,7 +2,6 @@ import os
 import json
 import aiofiles
 import aiofiles.os
-import re
 from datetime import datetime
 # need to be able to exit process immediately
 import sys
@@ -16,20 +15,6 @@ ACTIVE_DIR = f"{JOB_DIR}/active"
 COMPLETED_DIR = f"{JOB_DIR}/completed"
 FAILED_DIR = f"{JOB_DIR}/failed"
 JOB_INDEX = f"{JOB_DIR}/job_index.jsonl"
-
-def sanitize_job_type(job_type):
-    """Sanitize job_type to ensure it's safe for use in file paths.
-    
-    Replaces forward slashes and other potentially problematic characters
-    with underscores to avoid directory path issues.
-    """
-    if not job_type:
-        return "default"
-        
-    # Replace forward slashes and other potentially problematic characters
-    # with underscores to ensure valid directory names
-    sanitized = re.sub(r'[/\\?%*:|"<>]', '_', job_type)
-    return sanitized
 
 # Helper functions
 async def update_job_index(job_id, new_status, job_type=None):
@@ -104,8 +89,24 @@ async def update_job_index(job_id, new_status, job_type=None):
 
 async def get_job_data(job_id):
     """Get a job's data from any of the job directories"""
-    # Check in job type subdirectories for all status directories
-    job_found = False
+    # First check in the standard directories
+    for status_dir in [QUEUED_DIR, ACTIVE_DIR, COMPLETED_DIR, FAILED_DIR]:
+        job_path = f"{status_dir}/{job_id}.json"
+        try:
+            if await aiofiles.os.path.exists(job_path):
+                async with aiofiles.open(job_path, "r") as f:
+                    content = await f.read()
+                    return json.loads(content)
+        except FileNotFoundError:
+            # Might have been moved between exists check and open
+            continue
+        except json.JSONDecodeError as e:
+            print(f"Error decoding JSON for job {job_id} in {status_dir}: {e}")
+            # Return None or raise? Returning None seems safer.
+            return None
+        except Exception as e:
+            print(f"Error reading job data for {job_id} from {status_dir}: {e}")
+            return None # Indicate error reading data
     
     # If not found in standard directories, check in job type subdirectories
     try:
@@ -119,7 +120,6 @@ async def get_job_data(job_id):
                     if await aiofiles.os.path.exists(job_path):
                         async with aiofiles.open(job_path, "r") as f:
                             content = await f.read()
-                            job_found = True
                             return json.loads(content)
         
         # Check ACTIVE_DIR subdirectories
@@ -132,7 +132,6 @@ async def get_job_data(job_id):
                     if await aiofiles.os.path.exists(job_path):
                         async with aiofiles.open(job_path, "r") as f:
                             content = await f.read()
-                            job_found = True
                             return json.loads(content)
     except Exception as e:
         print(f"Error checking job type directories for job {job_id}: {e}")
@@ -148,16 +147,8 @@ async def get_job_data(job_id):
                     if await aiofiles.os.path.exists(job_path):
                         async with aiofiles.open(job_path, "r") as f:
                             content = await f.read()
-                            job_found = True
                             return json.loads(content)
     except Exception as e:
         print(f"Error checking completed job type directories for job {job_id}: {e}")
     
-    # Check FAILED_DIR (which doesn't use job type subdirectories)
-    failed_path = f"{FAILED_DIR}/{job_id}.json"
-    if await aiofiles.os.path.exists(failed_path):
-        async with aiofiles.open(failed_path, "r") as f:
-            content = await f.read()
-            return json.loads(content)
-            
     return None # Not found in any directory
