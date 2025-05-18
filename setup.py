@@ -2,22 +2,24 @@ from setuptools import setup, find_packages
 
 setup(
     name="mr_job_queue",
-    version="1.0.0",
+    version="2.1.0",
     packages=find_packages(where="src"),
     package_dir={"":"src"},
-    install_requires=[
-        "aiofiles",
-    ],
     package_data={
         "mr_job_queue": [
-            "templates/*.jinja2",
             "static/js/*.js",
             "static/css/*.css",
+            "templates/*.jinja2",
+            "inject/*.jinja2",
         ],
     },
+    install_requires=[
+        "fastapi",
+        "aiofiles",
+        "python-multipart",  # For file uploads
+    ],
+    description="A plugin to manage background jobs processed by agents",
     author="MindRoot",
-    author_email="admin@mindroot.ai",
-    description="Simple file-based job queue for running agent tasks asynchronously",
-    keywords="mindroot, plugin, job, queue",
-    python_requires=">=3.8",
+    author_email="info@mindroot.ai",
+    url="https://github.com/runvnc/mindroot",
 )

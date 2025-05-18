@@ -1,0 +1,23 @@
+{% block head_scripts %}
+    <script type="module" src="/admin/static/js/llm-selector.js"></script>
+    <script type="module" src="/mr_job_queue/static/js/job-submission-form.js"></script>
+    <script type="module" src="/mr_job_queue/static/js/jobs-list.js"></script>
+{% endblock %}
+
+{% block head_css %}
+    <link rel="stylesheet" href="/mr_job_queue/static/css/styles.css">
+{% endblock %}
+
+{% block body_main %}
+    <div class="job-queue-container">
+        <h2>Job Queue</h2>
+        <job-submission-form></job-submission-form>
+        <jobs-list></jobs-list>
+    </div>
+
+    <dialog id="job-output">
+        <span class="close-modal">&times;</span>
+        <h3 class="result-title">Job Result</h3>
+        <div class="result-content"></div>
+    </dialog>
+{% endblock %}

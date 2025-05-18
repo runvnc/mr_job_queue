@@ -165,6 +165,7 @@ async def add_job(instructions, agent_name, job_type=None, username=None, metada
                     "id": job_id,
                     "status": "queued",
                     "agent_name": agent_name,
+                    "instructions": instructions[:150],
                     "job_type": job_type,
                     "created_at": job_data["created_at"],
                     "username": job_data["username"]
@@ -210,9 +211,10 @@ async def process_job(job_id, job_data, job_type=None):
         # Ensure run_task service exists
         if not hasattr(service_manager, 'run_task'):
              raise RuntimeError("run_task service is not available via service_manager")
+        instr = job_data["instructions"] + "\n\nMetadata:\n" + json.dumps(job_data['metadata']) if job_data['metadata'] else job_data["instructions"]
 
         text, full_results, log_id = await service_manager.run_task(
-            instructions=job_data["instructions"],
+            instructions=instr,
             agent_name=job_data["agent_name"],
             user=job_data["username"],
             retries=3,

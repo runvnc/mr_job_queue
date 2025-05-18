@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Request, Depends, HTTPException
+from fastapi import APIRouter, Request, Depends, HTTPException, File, UploadFile, Form
 from fastapi.responses import HTMLResponse, JSONResponse
 from lib.templates import render
 from lib.auth.auth import require_user
@@ -6,6 +6,8 @@ import os
 import aiofiles
 import aiofiles.os
 import json
+import traceback
+from typing import List, Optional
 from .commands import (
     get_job_status, get_jobs, cancel_job, cleanup_jobs,
     QUEUED_DIR, ACTIVE_DIR, COMPLETED_DIR, FAILED_DIR
@@ -51,36 +53,73 @@ async def get_job(request: Request, job_id: str, user=Depends(require_user)):
             context = request.state.context
             
         job = await get_job_status(job_id, context=context)
-        if "error" in job:
+        print("job result", job)
+        if "error" in job and job['error'] is not None:
             return JSONResponse({"error": job["error"]}, status_code=404)
         return JSONResponse(job)
     except Exception as e:
+        print(e)
+        print(traceback.format_exc())
         return JSONResponse({"error": str(e)}, status_code=500)
 
 @router.post("/api/jobs")
-async def create_job(request: Request, user=Depends(require_user)):
-    """Submit a new job"""
+async def create_job(
+    request: Request,
+    instructions: str = Form(...),
+    agent_name: str = Form(...),
+    metadata: Optional[str] = Form(None),
+    job_type: Optional[str] = Form(None),
+    files: List[UploadFile] = File([]),
+    user=Depends(require_user)
+):
+    """Submit a new job with optional file uploads"""
     try:
-        data = await request.json()
-        if not all(k in data for k in ["instructions", "agent_name"]):
-            raise HTTPException(status_code=400, detail="Missing required fields: instructions, agent_name")
-        
         # Get context if available, otherwise pass None
         context = None
         if hasattr(request.state, 'context'):
             context = request.state.context
+        
+        # Parse metadata if provided
+        metadata_dict = None
+        if metadata:
+            try:
+                metadata_dict = json.loads(metadata)
+            except json.JSONDecodeError:
+                return JSONResponse({"error": "Invalid metadata format"}, status_code=400)
+        
+        # Handle file uploads if any
+        uploaded_files = []
+        if files:
+            # Create a directory for uploaded files if it doesn't exist
+            upload_dir = os.path.join("data", "uploads")
+            os.makedirs(upload_dir, exist_ok=True)
             
+            for file in files:
+                # Save the file
+                file_path = os.path.join(upload_dir, file.filename)
+                content = await file.read()
+                async with aiofiles.open(file_path, "wb") as f:
+                    await f.write(content)
+                uploaded_files.append(file_path)
+        
+        # Add uploaded files to metadata
+        if uploaded_files:
+            if not metadata_dict:
+                metadata_dict = {}
+            metadata_dict["uploaded_files"] = uploaded_files
+        
+        # Submit the job
         result = await add_job(
-            instructions=data["instructions"],
-            agent_name=data["agent_name"],
-            job_type=data.get("job_type"),
-            metadata=data.get("metadata"),
-            username=user.username, # Pass username from authenticated user
+            instructions=instructions,
+            agent_name=agent_name,
+            job_type=job_type,
+            metadata=metadata_dict,
+            username=user.username,
             context=context
         )
         
         if "error" in result:
-            raise HTTPException(status_code=500, detail=result["error"])
+            return JSONResponse({"error": result["error"]}, status_code=500)
         return JSONResponse(result)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)

@@ -103,7 +103,7 @@ async def get_jobs(status=None, job_type=None, username=None, limit=50, context=
                     # Ignore malformed lines in the index
                     print(f"Warning: Skipping malformed line in {JOB_INDEX}: {line.strip()}")
                     continue
-    
+    jobs.reverse()
     return jobs
 
 @command()
