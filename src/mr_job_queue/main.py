@@ -117,9 +117,9 @@ async def add_job(instructions, agent_name, job_type=None, username=None, metada
     completed_job_type_dir = f"{COMPLETED_DIR}/{job_type}"
     
     # Ensure job type directories exist
-    os.makedirs(queued_job_type_dir, exist_ok=True)
-    os.makedirs(active_job_type_dir, exist_ok=True)
-    os.makedirs(completed_job_type_dir, exist_ok=True)
+    await aiofiles.os.makedirs(queued_job_type_dir, exist_ok=True)
+    await aiofiles.os.makedirs(active_job_type_dir, exist_ok=True)
+    await aiofiles.os.makedirs(completed_job_type_dir, exist_ok=True)
     
     # Save job file in the appropriate job_type directory
     job_path = f"{queued_job_type_dir}/{job_id}.json"
@@ -326,9 +326,9 @@ async def job_type_worker_loop(job_type):
     completed_job_type_dir = f"{COMPLETED_DIR}/{job_type}"
     
     # Ensure job type directories exist
-    os.makedirs(queued_job_type_dir, exist_ok=True)
-    os.makedirs(active_job_type_dir, exist_ok=True)
-    os.makedirs(completed_job_type_dir, exist_ok=True)
+    await aiofiles.os.makedirs(queued_job_type_dir, exist_ok=True)
+    await aiofiles.os.makedirs(active_job_type_dir, exist_ok=True)
+    await aiofiles.os.makedirs(completed_job_type_dir, exist_ok=True)
     
     while worker_running.is_set():
         queued_jobs_files = []

@@ -34,7 +34,7 @@ def sanitize_job_type(job_type):
 # Helper functions
 async def update_job_index(job_id, new_status, job_type=None):
     """Update a job's status in the index file"""
-    if not os.path.exists(JOB_INDEX):
+    if not await aiofiles.os.path.exists(JOB_INDEX):
         # If index doesn't exist, we can't update it.
         # If status is 'removed', this is fine.
         # If adding a new job, the add_job function handles initial creation.

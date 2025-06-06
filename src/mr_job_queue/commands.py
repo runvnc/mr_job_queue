@@ -76,34 +76,35 @@ async def get_jobs(status=None, job_type=None, username=None, limit=50, context=
         List of matching jobs
     """
     jobs = []
-    count = 0
+    all_jobs = []
     
     # Read from index for faster lookup
-    if os.path.exists(JOB_INDEX):
-        # Note: FileLock is not used here in the original code for read-only access
+    if await aiofiles.os.path.exists(JOB_INDEX):
         async with aiofiles.open(JOB_INDEX, "r") as f:
-            async for line in f:
-                if count >= limit:
-                    break
-                    
+            lines = await f.readlines()
+            # Reverse the lines to process newest jobs first
+            for line in reversed(lines):
                 try:
-                    job_entry = json.loads(line.strip())
-                    
-                    # Apply filters
-                    if status and job_entry.get("status") != status:
-                        continue
-                    if job_type and job_entry.get("job_type") != job_type:
-                        continue
-                    if username and job_entry.get("username") != username:
-                        continue
-                    
-                    jobs.append(job_entry)
-                    count += 1
+                    all_jobs.append(json.loads(line.strip()))
                 except json.JSONDecodeError:
-                    # Ignore malformed lines in the index
                     print(f"Warning: Skipping malformed line in {JOB_INDEX}: {line.strip()}")
                     continue
-    jobs.reverse()
+
+    # Now filter and limit the jobs from the in-memory list, which is already newest-first
+    for job_entry in all_jobs:
+        if len(jobs) >= limit:
+            break
+
+        # Apply filters
+        if status and job_entry.get("status") != status:
+            continue
+        if job_type and job_entry.get("job_type") != job_type:
+            continue
+        if username and job_entry.get("username") != username:
+            continue
+        
+        jobs.append(job_entry)
+
     return jobs
 
 @command()
