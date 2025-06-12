@@ -316,6 +316,11 @@ class JobsList extends BaseEl {
       line-height: 1.5;
     }
     
+    .modal-header {
+        display: flex;
+        justify-content: space-between;
+    }
+    
     .markdown-result h1, .markdown-result h2, .markdown-result h3 { margin-top: 1rem; margin-bottom: 0.5rem; }
     .markdown-result p { margin-bottom: 1rem; }
     .markdown-result pre { background: rgba(0,0,0,0.2); padding: 0.5rem; border-radius: 4px; overflow-x: auto; }
@@ -323,6 +328,17 @@ class JobsList extends BaseEl {
     .markdown-result ul, .markdown-result ol { margin-left: 1.5rem; margin-bottom: 1rem; }
     .markdown-result img { max-width: 100%; height: auto; }
     .markdown-result blockquote { border-left: 3px solid var(--border-color, #4a5568); padding-left: 1rem; margin-left: 0; color: var(--text-secondary, #cbd5e0); }
+
+    .print-btn {
+      background-color: var(--primary, #667eea);
+      color: white;
+      border: none;
+      padding: 0.5rem 1rem;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 0.9rem;
+      margin-right: 1rem;
+    }
 
   `;
 
@@ -407,96 +423,91 @@ class JobsList extends BaseEl {
     return status.charAt(0).toUpperCase() + status.slice(1);
   }
 
+  printJobResult() {
+    const modalContent = this.resultModal.querySelector('.result-content').innerHTML;
+    const printWindow = window.open('', '', 'height=600,width=800');
+    printWindow.document.write('<html><head><title>Job Result</title>');
+    // Optional: Add some basic styling for printing
+    printWindow.document.write('<style>');
+    printWindow.document.write('body { font-family: sans-serif; } pre { white-space: pre-wrap; }');
+    printWindow.document.write('</style>');
+    printWindow.document.write('</head><body>');
+    printWindow.document.write(modalContent);
+    printWindow.document.write('</body></html>');
+    printWindow.document.close();
+    printWindow.focus(); // Necessary for some browsers
+    printWindow.print();
+    printWindow.close();
+  }
+
   async showJobResult(jobId) {
-    try {
-      // First check if we already have a modal element
-      const modalId = "job-output";
-      if (!this.resultModal) {
-        // Create modal elements if they don't exist
-        this.resultModal = document.getElementById("job-output")
-        // Add event listener to close button
-        const closeBtn = this.resultModal.querySelector('.close-modal');
-        closeBtn.addEventListener('click', () => {
-          this.resultModal.close()
-        });
-
-        // Close modal when clicking outside of it
-        this.resultModal.addEventListener('click', (e) => {
-          if (e.target === this.resultModal) {
-            this.resultModal.close()
-          }
-        });
-      }
-
-      // If modal doesn't exist in the DOM, create it
-      if (!this.resultModal) {
-        // Create the modal element
-        this.resultModal = document.createElement('dialog');
-        this.resultModal.id = modalId;
-        this.resultModal.className = 'modal-content';
-        
-        // Add modal content
-        this.resultModal.innerHTML = `
-          <div class="modal-header">
-            <h3>Job Result</h3>
-            <button class="close-modal">&times;</button>
-          </div>
-          <div class="result-content"></div>
-        `;
-        
-        // Add to document
-        document.body.appendChild(this.resultModal);
-        
-        // Add event listeners
-        this.resultModal.querySelector('.close-modal').addEventListener('click', () => this.resultModal.close());
-      }
-
-      // Fetch job result from completed directory
-      const response = await fetch(`/api/jobs/${jobId}`);
-      if (response.ok) {
-        const jobData = await response.json();
-        
-        // Add marked.js script if not already loaded
-        this.ensureMarkedJsLoaded();
-        const result = jobData.result || 'No result available';
-        const resultContent = this.resultModal.querySelector('.result-content');
-        
-        // Check if the result looks like markdown
-        const isMarkdown = this.looksLikeMarkdown(result);
-        
-        if (isMarkdown) {
-          try {
-            // Try to use marked.js if available
-            if (window.marked) {
-              // Create a container with markdown class
-              resultContent.innerHTML = '';
-              const markdownDiv = document.createElement('div');
-              markdownDiv.className = 'markdown-result';
-              
-              // Parse markdown and set as HTML
-              markdownDiv.innerHTML = marked.parse(result);
-              resultContent.appendChild(markdownDiv);
-            } else {
-              // Fallback if marked.js is not available
-              resultContent.innerHTML = result;
-              console.warn('Marked.js not available for markdown rendering');
-            }
-          } catch (error) {
-            console.error('Error parsing markdown:', error);
-            resultContent.innerHTML = result;
-          }
-        } else {
-          // Not markdown, display as plain text
-          resultContent.innerHTML = result;
-        }
-        
-        this.resultModal.showModal();
-      } else {
-        console.error(`Error fetching job result for ${jobId}:`, await response.json());
-      }
-    } catch (error) {
-      console.error('Error showing job result:', error);
-    }
+     try {
+         const modalId = "job-output";
+         if (!this.resultModal) {
+             this.resultModal = document.getElementById(modalId);
+         }
+ 
+         if (!this.resultModal) {
+             this.resultModal = document.createElement('dialog');
+             this.resultModal.id = modalId;
+             document.body.appendChild(this.resultModal);
+             this.resultModal.addEventListener('click', (e) => {
+                 if (e.target === this.resultModal) {
+                     this.resultModal.close();
+                 }
+             });
+         }
+ 
+         this.resultModal.className = 'modal-content';
+         this.resultModal.innerHTML = `
+           <div class="modal-header">
+             <h3>Job Result</h3>
+             <div>
+                 <button class="print-btn">Print</button>
+                 <button class="close-modal">&times;</button>
+             </div>
+           </div>
+           <div class="result-content"></div>
+         `;
+ 
+         this.resultModal.querySelector('.close-modal').addEventListener('click', () => this.resultModal.close());
+         this.resultModal.querySelector('.print-btn').addEventListener('click', () => this.printJobResult());
+ 
+         const response = await fetch(`/api/jobs/${jobId}`);
+         if (response.ok) {
+             const jobData = await response.json();
+             this.ensureMarkedJsLoaded();
+             const result = jobData.result || 'No result available';
+             const resultContent = this.resultModal.querySelector('.result-content');
+             const isMarkdown = this.looksLikeMarkdown(result);
+ 
+             if (isMarkdown) {
+                 try {
+                     if (window.marked) {
+                         resultContent.innerHTML = '';
+                         const markdownDiv = document.createElement('div');
+                         markdownDiv.className = 'markdown-result';
+                         markdownDiv.innerHTML = marked.parse(result);
+                         resultContent.appendChild(markdownDiv);
+                     } else {
+                         resultContent.innerHTML = result;
+                         console.warn('Marked.js not available for markdown rendering');
+                     }
+                 } catch (error) {
+                     console.error('Error parsing markdown:', error);
+                     resultContent.innerHTML = result;
+                 }
+             } else {
+                 resultContent.innerHTML = result;
+             }
+ 
+             this.resultModal.showModal();
+         } else {
+             console.error(`Error fetching job result for ${jobId}:`, await response.json());
+         }
+     } catch (error) {
+         console.error('Error showing job result:', error);
+     }
   }
   
   ensureMarkedJsLoaded() {

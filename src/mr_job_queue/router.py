@@ -37,7 +37,10 @@ async def list_jobs(request: Request, status: str = None, job_type: str = None, 
             context = request.state.context
         
         # Call get_jobs with appropriate parameters
-        jobs = await get_jobs(status=status, job_type=job_type, username=user.username, limit=limit, context=context)
+        # Admins see all jobs, others see only their own
+        uname_filter = None if 'admin' in getattr(user, 'roles', []) else user.username
+
+        jobs = await get_jobs(status=status, job_type=job_type, username=uname_filter, limit=limit, context=context)
         return JSONResponse(jobs)
     except Exception as e:
         print(e)
