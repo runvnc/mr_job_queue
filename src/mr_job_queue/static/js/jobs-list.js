@@ -637,15 +637,29 @@ class JobsList extends BaseEl {
 
     .modal-content {
       background-color: var(--background-secondary, #2d3748);
-      position: fixed;
       margin: auto;
       padding: 20px;
       border-radius: 8px;
-      width: 90%;
+      border: none;
       max-width: 1400px;
+      width: 90%;
       max-height: 90vh;
       overflow-y: auto;
-      position: relative;
+    }
+
+    dialog.modal-content {
+      position: fixed;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+    }
+
+    dialog.modal-content::backdrop {
+      background-color: rgba(0, 0, 0, 0.7);
+    }
+
+    .modal-content {
+      width: 90%;
     }
 
     .close-modal {
