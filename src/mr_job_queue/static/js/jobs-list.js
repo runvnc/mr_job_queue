@@ -836,6 +836,23 @@ class JobsList extends BaseEl {
   async showJobResult(jobId) {
     try {
       const modalId = "job-output";
+      
+      // Ensure global styles for dialogs are loaded
+      if (!document.getElementById('dialog-styles')) {
+        const style = document.createElement('style');
+        style.id = 'dialog-styles';
+        style.textContent = `
+          dialog.modal-content {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            margin: 0;
+          }
+        `;
+        document.head.appendChild(style);
+      }
+      
       if (!this.resultModal) {
         this.resultModal = document.getElementById(modalId);
       }
