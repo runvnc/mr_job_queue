@@ -835,6 +835,11 @@ class JobsList extends BaseEl {
             this.resultModal.close();
           }
         });
+        this.resultModal.addEventListener('cancel', (e) => {
+          if (e.target === this.resultModal) {
+            this.resultModal.close();
+          }
+        });
       }
 
       this.resultModal.className = 'modal-content';
@@ -880,7 +885,12 @@ class JobsList extends BaseEl {
           resultContent.innerHTML = result;
         }
 
+        // Prevent page scroll when showing modal
+        const scrollY = window.scrollY;
         this.resultModal.showModal();
+        requestAnimationFrame(() => {
+          window.scrollTo(0, scrollY);
+        });
       } else {
         console.error(`Error fetching job result for ${jobId}:`, await response.json());
       }
@@ -939,6 +949,11 @@ class JobsList extends BaseEl {
             this.tokenModal.close();
           }
         });
+        this.tokenModal.addEventListener('cancel', (e) => {
+          if (e.target === this.tokenModal) {
+            this.tokenModal.close();
+          }
+        });
       }
 
       this.tokenModal.className = 'modal-content';
@@ -956,7 +971,13 @@ class JobsList extends BaseEl {
       `;
 
       this.tokenModal.querySelector('.close-modal').addEventListener('click', () => this.tokenModal.close());
+      
+      // Prevent page scroll when showing modal
+      const scrollY = window.scrollY;
       this.tokenModal.showModal();
+      requestAnimationFrame(() => {
+        window.scrollTo(0, scrollY);
+      });
 
       // Fetch token data
       const response = await fetch(`/api/jobs/${jobId}/tokens`);
