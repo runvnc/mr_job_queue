@@ -1,6 +1,423 @@
 import { BaseEl } from '/chat/static/js/base.js';
 import { html, css } from '/chat/static/js/lit-core.min.js';
 
+class TokenTreeNode extends BaseEl {
+  static properties = {
+    nodeData: { type: Object },
+    expanded: { type: Boolean },
+    isRoot: { type: Boolean }
+  };
+
+  static styles = css`
+    .tree-node {
+      margin: 0.5rem 0;
+      border-left: 2px solid var(--border-color, #4a5568);
+      padding-left: 1rem;
+      position: relative;
+    }
+
+    .tree-node:before {
+      content: '';
+      position: absolute;
+      left: -2px;
+      top: 1rem;
+      width: 12px;
+      height: 2px;
+      background: var(--border-color, #4a5568);
+    }
+
+    .tree-node.root {
+      border-left: none;
+      padding-left: 0;
+    }
+
+    .tree-node.root:before {
+      display: none;
+    }
+
+    .node-header {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      margin-bottom: 0.5rem;
+      padding: 0.5rem;
+      background: rgba(255, 255, 255, 0.05);
+      border-radius: 4px;
+      cursor: pointer;
+      transition: background-color 0.2s;
+    }
+
+    .node-header:hover {
+      background: rgba(255, 255, 255, 0.1);
+    }
+
+    .expand-icon {
+      font-size: 0.8rem;
+      color: var(--text-secondary, #cbd5e0);
+      width: 12px;
+      text-align: center;
+    }
+
+    .node-info {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+    }
+
+    .node-id {
+      font-weight: bold;
+      color: var(--primary, #667eea);
+      text-decoration: none;
+    }
+
+    .node-id:hover {
+      text-decoration: underline;
+    }
+
+    .node-agent {
+      color: var(--text-secondary, #cbd5e0);
+      font-size: 0.85rem;
+    }
+
+    .token-counts {
+      display: flex;
+      gap: 0.5rem;
+      font-size: 0.8rem;
+    }
+
+    .token-count {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      min-width: 50px;
+    }
+
+    .token-label {
+      color: var(--text-secondary, #cbd5e0);
+      font-size: 0.7rem;
+      margin-bottom: 0.2rem;
+    }
+
+    .token-value {
+      color: var(--text-color, #f7fafc);
+      font-weight: bold;
+    }
+
+    .token-count.individual .token-value {
+      color: var(--success, #48bb78);
+    }
+
+    .token-count.cumulative .token-value {
+      color: var(--warning, #ed8936);
+    }
+
+    .node-children {
+      margin-left: 1rem;
+      display: none;
+    }
+
+    .node-children.expanded {
+      display: block;
+    }
+  `;
+
+  constructor() {
+    super();
+    this.expanded = false;
+    this.isRoot = false;
+  }
+
+  toggleExpanded() {
+    this.expanded = !this.expanded;
+    this.requestUpdate();
+  }
+
+  formatNumber(num) {
+    return num ? num.toLocaleString() : '0';
+  }
+
+  _render() {
+    if (!this.nodeData) return html``;
+
+    const hasChildren = this.nodeData.children && this.nodeData.children.length > 0;
+    const expandIcon = hasChildren ? (this.expanded ? '▼' : '▶') : '•';
+
+    return html`
+      <div class="tree-node ${this.isRoot ? 'root' : ''}">
+        <div class="node-header" @click=${this.toggleExpanded}>
+          <span class="expand-icon">${expandIcon}</span>
+          <div class="node-info">
+            <a href="/session/${this.nodeData.agent}/${this.nodeData.log_id}" 
+               target="_blank" class="node-id">
+              ${this.nodeData.log_id}
+            </a>
+            <span class="node-agent">(${this.nodeData.agent})</span>
+          </div>
+          <div class="token-counts">
+            <div class="token-count individual">
+              <div class="token-label">Input (Individual)</div>
+              <div class="token-value">
+                ${this.formatNumber(this.nodeData.individual_counts.input_tokens_sequence)}
+              </div>
+            </div>
+            <div class="token-count individual">
+              <div class="token-label">Output (Individual)</div>
+              <div class="token-value">
+                ${this.formatNumber(this.nodeData.individual_counts.output_tokens_sequence)}
+              </div>
+            </div>
+            <div class="token-count cumulative">
+              <div class="token-label">Input (Cumulative)</div>
+              <div class="token-value">
+                ${this.formatNumber(this.nodeData.cumulative_counts.input_tokens_sequence)}
+              </div>
+            </div>
+            <div class="token-count cumulative">
+              <div class="token-label">Output (Cumulative)</div>
+              <div class="token-value">
+                ${this.formatNumber(this.nodeData.cumulative_counts.output_tokens_sequence)}
+              </div>
+            </div>
+            <div class="token-count">
+              <div class="token-label">Context Total</div>
+              <div class="token-value">
+                ${this.formatNumber(this.nodeData.cumulative_counts.input_tokens_total)}
+              </div>
+            </div>
+          </div>
+        </div>
+        ${hasChildren && this.expanded ? html`
+          <div class="node-children expanded">
+            ${this.nodeData.children.map(child => html`
+              <token-tree-node .nodeData=${child}></token-tree-node>
+            `)}
+          </div>
+        ` : ''}
+      </div>
+    `;
+  }
+}
+
+customElements.define('token-tree-node', TokenTreeNode);
+
+class TokenTree extends BaseEl {
+  static properties = {
+    hierarchy: { type: Object },
+    allExpanded: { type: Boolean }
+  };
+
+  static styles = css`
+    :host {
+      display: block;
+      font-family: monospace;
+      font-size: 0.9rem;
+      line-height: 1.4;
+    }
+
+    .token-summary {
+      background: var(--background-primary, #1a202c);
+      padding: 1rem;
+      border-radius: 6px;
+      margin-bottom: 1rem;
+      border: 1px solid var(--border-color, #4a5568);
+    }
+
+    .summary-title {
+      font-size: 1rem;
+      font-weight: 600;
+      color: var(--text-color, #f7fafc);
+      margin-bottom: 0.5rem;
+    }
+
+    .summary-stats {
+      display: flex;
+      gap: 1rem;
+      flex-wrap: wrap;
+    }
+
+    .summary-stat {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      min-width: 70px;
+    }
+
+    .summary-label {
+      color: var(--text-secondary, #cbd5e0);
+      font-size: 0.75rem;
+      margin-bottom: 0.25rem;
+    }
+
+    .summary-value {
+      color: var(--text-color, #f7fafc);
+      font-weight: bold;
+      font-family: monospace;
+      font-size: 1.1em;
+    }
+
+    .tree-controls {
+      margin-bottom: 1rem;
+      display: flex;
+      gap: 0.5rem;
+      align-items: center;
+    }
+
+    .expand-all-btn, .collapse-all-btn {
+      background-color: var(--secondary, #a0aec0);
+      color: white;
+      border: none;
+      padding: 0.25rem 0.5rem;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 0.75rem;
+      margin-right: 0.5rem;
+      transition: background-color 0.2s;
+    }
+
+    .expand-all-btn:hover, .collapse-all-btn:hover {
+      background-color: var(--secondary-dark, #718096);
+    }
+
+    .tree-legend {
+      display: flex;
+      gap: 2rem;
+      margin-bottom: 1rem;
+      padding: 0.5rem;
+      background: rgba(255, 255, 255, 0.05);
+      border-radius: 4px;
+      font-size: 0.8rem;
+    }
+
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .legend-color {
+      width: 12px;
+      height: 12px;
+      border-radius: 2px;
+    }
+
+    .legend-individual {
+      background: var(--success, #48bb78);
+    }
+
+    .legend-cumulative {
+      background: var(--warning, #ed8936);
+    }
+
+    .error-message {
+      color: var(--error, #f56565);
+      padding: 0.75rem;
+      background-color: var(--error-bg, #742a2a);
+      border-radius: 4px;
+      border-left: 3px solid var(--error, #f56565);
+      margin-bottom: 1rem;
+    }
+  `;
+
+  constructor() {
+    super();
+    this.allExpanded = false;
+  }
+
+  expandAll() {
+    this.allExpanded = true;
+    this.expandAllNodes(true);
+  }
+
+  collapseAll() {
+    this.allExpanded = false;
+    this.expandAllNodes(false);
+  }
+
+  expandAllNodes(expanded) {
+    const nodes = this.shadowRoot.querySelectorAll('token-tree-node');
+    nodes.forEach(node => {
+      node.expanded = expanded;
+      node.requestUpdate();
+    });
+  }
+
+  formatNumber(num) {
+    return num ? num.toLocaleString() : '0';
+  }
+
+  _render() {
+    if (!this.hierarchy) {
+      return html`<div class="error-message">No hierarchy data available</div>`;
+    }
+
+    const mainInput = this.hierarchy.individual_counts.input_tokens_sequence;
+    const mainOutput = this.hierarchy.individual_counts.output_tokens_sequence;
+    const totalInput = this.hierarchy.cumulative_counts.input_tokens_sequence;
+    const totalOutput = this.hierarchy.cumulative_counts.output_tokens_sequence;
+    const delegatedInput = totalInput - mainInput;
+    const delegatedOutput = totalOutput - mainOutput;
+
+    return html`
+      <div class="token-tree">
+        <div class="token-summary">
+          <div class="summary-title">Token Usage Summary</div>
+          <div class="summary-stats">
+            <div class="summary-stat">
+              <div class="summary-label">Main Input</div>
+              <div class="summary-value">${this.formatNumber(mainInput)}</div>
+            </div>
+            <div class="summary-stat">
+              <div class="summary-label">Main Output</div>
+              <div class="summary-value">${this.formatNumber(mainOutput)}</div>
+            </div>
+            <div class="summary-stat">
+              <div class="summary-label">Total Input</div>
+              <div class="summary-value">${this.formatNumber(totalInput)}</div>
+            </div>
+            <div class="summary-stat">
+              <div class="summary-label">Total Output</div>
+              <div class="summary-value">${this.formatNumber(totalOutput)}</div>
+            </div>
+            <div class="summary-stat">
+              <div class="summary-label">Delegated Input</div>
+              <div class="summary-value">${this.formatNumber(delegatedInput)}</div>
+            </div>
+            <div class="summary-stat">
+              <div class="summary-label">Delegated Output</div>
+              <div class="summary-value">${this.formatNumber(delegatedOutput)}</div>
+            </div>
+            <div class="summary-stat">
+              <div class="summary-label">Context Total</div>
+              <div class="summary-value">${this.formatNumber(this.hierarchy.cumulative_counts.input_tokens_total)}</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="tree-controls">
+          <button class="expand-all-btn" @click=${this.expandAll}>Expand All</button>
+          <button class="collapse-all-btn" @click=${this.collapseAll}>Collapse All</button>
+        </div>
+
+        <div class="tree-legend">
+          <div class="legend-item">
+            <div class="legend-color legend-individual"></div>
+            <span>Individual: Input/Output tokens used by this specific task only</span>
+          </div>
+          <div class="legend-item">
+            <div class="legend-color legend-cumulative"></div>
+            <span>Cumulative: Input/Output tokens including all subtasks in this branch</span>
+          </div>
+        </div>
+
+        <token-tree-node .nodeData=${this.hierarchy} .isRoot=${true} .expanded=${true}></token-tree-node>
+      </div>
+    `;
+  }
+}
+
+customElements.define('token-tree', TokenTree);
+
 class JobsList extends BaseEl {
   static properties = {
     jobs: { type: Array },
@@ -103,42 +520,6 @@ class JobsList extends BaseEl {
       background-color: var(--hover-bg, rgba(255, 255, 255, 0.05));
     }
 
-    .status-icon {
-      display: inline-block;
-      width: 12px;
-      height: 12px;
-      margin-right: 4px;
-      border-radius: 50%;
-      margin-right: 4px;
-    }
-
-    .status-icon-queued {
-      background-color: var(--info, #63b3ed);
-    }
-
-    .status-icon-active {
-      background-color: var(--warning, #ed8936);
-    }
-
-    .status-icon-completed {
-      background-color: var(--success, #48bb78);
-    }
-
-    .status-icon-failed {
-      background-color: var(--error, #f56565);
-    }
-
-    .status-icon-wrapper {
-      display: flex;
-      align-items: center;
-    }
-
-    .status-icon-text {
-      margin-left: 4px;
-      font-size: 0.75rem;
-    }
-
-    /* Material icons for status */
     .material-icon {
       font-size: 16px;
       margin-right: 4px;
@@ -164,35 +545,6 @@ class JobsList extends BaseEl {
       cursor: pointer;
       text-decoration: underline;
       color: var(--primary, #667eea);
-    }
-
-    .status-badge {
-      display: inline-block;
-      padding: 0.25rem 0.5rem;
-      border-radius: 4px;
-      font-size: 0.75rem;
-      font-weight: 600;
-      text-transform: uppercase;
-    }
-
-    .status-queued {
-      background-color: var(--info-light, #2a4365);
-      color: var(--info, #63b3ed);
-    }
-
-    .status-active {
-      background-color: var(--warning-light, #7b341e);
-      color: var(--warning, #ed8936);
-    }
-
-    .status-completed {
-      background-color: var(--success-light, #1c4532);
-      color: var(--success, #48bb78);
-    }
-
-    .status-failed {
-      background-color: var(--error-light, #742a2a);
-      color: var(--error, #f56565);
     }
 
     .job-link {
@@ -243,13 +595,11 @@ class JobsList extends BaseEl {
 
     .truncate {
       max-width: 200px;
-      /* white-space: nowrap; */
       overflow: hidden;
       text-overflow: ellipsis;
       display: inline-block;
     }
 
-    /* Table column widths */
     .col-id { width: 12%; }
     .col-status { width: 5%; }
     .col-job-type { width: 15%; max-width: 150px; }
@@ -257,34 +607,43 @@ class JobsList extends BaseEl {
     .col-created { width: 12%; }
     .col-instructions { width: 28%; }
     .col-result { width: 10%; }
+    .col-tokens { width: 8%; }
 
-    /* Modal styles */
-    .modal {
-      display: none;
-      position: fixed;
-      z-index: 1000;
-      left: 0;
-      top: 0;
-      width: 100%;
-      height: 100%;
-      overflow: auto;
-      background-color: rgba(0, 0, 0, 0.7);
+    .token-btn {
+      background-color: var(--info, #63b3ed);
+      color: white;
+      border: none;
+      padding: 0.25rem 0.5rem;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 0.75rem;
+      transition: background-color 0.2s;
     }
 
-    .modal.show {
-      display: flex;
-      align-items: center;
-      justify-content: center;
+    .token-btn:hover {
+      background-color: var(--info-dark, #3182ce);
+    }
+
+    .print-btn {
+      background-color: var(--primary, #667eea);
+      color: white;
+      border: none;
+      padding: 0.5rem 1rem;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 0.9rem;
+      margin-right: 1rem;
     }
 
     .modal-content {
       background-color: var(--background-secondary, #2d3748);
+      position: fixed;
       margin: auto;
       padding: 20px;
       border-radius: 8px;
-      width: 80%;
-      max-width: 800px;
-      max-height: 80vh;
+      width: 90%;
+      max-width: 1400px;
+      max-height: 90vh;
       overflow-y: auto;
       position: relative;
     }
@@ -315,31 +674,51 @@ class JobsList extends BaseEl {
       font-family: inherit;
       line-height: 1.5;
     }
-    
+
     .modal-header {
-        display: flex;
-        justify-content: space-between;
-    }
-    
-    .markdown-result h1, .markdown-result h2, .markdown-result h3 { margin-top: 1rem; margin-bottom: 0.5rem; }
-    .markdown-result p { margin-bottom: 1rem; }
-    .markdown-result pre { background: rgba(0,0,0,0.2); padding: 0.5rem; border-radius: 4px; overflow-x: auto; }
-    .markdown-result code { font-family: monospace; background: rgba(0,0,0,0.2); padding: 0.1rem 0.3rem; border-radius: 3px; }
-    .markdown-result ul, .markdown-result ol { margin-left: 1.5rem; margin-bottom: 1rem; }
-    .markdown-result img { max-width: 100%; height: auto; }
-    .markdown-result blockquote { border-left: 3px solid var(--border-color, #4a5568); padding-left: 1rem; margin-left: 0; color: var(--text-secondary, #cbd5e0); }
-
-    .print-btn {
-      background-color: var(--primary, #667eea);
-      color: white;
-      border: none;
-      padding: 0.5rem 1rem;
-      border-radius: 4px;
-      cursor: pointer;
-      font-size: 0.9rem;
-      margin-right: 1rem;
+      display: flex;
+      justify-content: space-between;
     }
 
+    .markdown-result h1, .markdown-result h2, .markdown-result h3 { 
+      margin-top: 1rem; 
+      margin-bottom: 0.5rem; 
+    }
+
+    .markdown-result p { 
+      margin-bottom: 1rem; 
+    }
+
+    .markdown-result pre { 
+      background: rgba(0,0,0,0.2); 
+      padding: 0.5rem; 
+      border-radius: 4px; 
+      overflow-x: auto; 
+    }
+
+    .markdown-result code { 
+      font-family: monospace; 
+      background: rgba(0,0,0,0.2); 
+      padding: 0.1rem 0.3rem; 
+      border-radius: 3px; 
+    }
+
+    .markdown-result ul, .markdown-result ol { 
+      margin-left: 1.5rem; 
+      margin-bottom: 1rem; 
+    }
+
+    .markdown-result img { 
+      max-width: 100%; 
+      height: auto; 
+    }
+
+    .markdown-result blockquote { 
+      border-left: 3px solid var(--border-color, #4a5568); 
+      padding-left: 1rem; 
+      margin-left: 0; 
+      color: var(--text-secondary, #cbd5e0); 
+    }
   `;
 
   constructor() {
@@ -355,8 +734,9 @@ class JobsList extends BaseEl {
     // Listen for job submission events
     window.addEventListener('job-submitted', () => this.loadJobs());
 
-    // Initialize modal element
+    // Initialize modal elements
     this.resultModal = null;
+    this.tokenModal = null;
   }
 
   disconnectedCallback() {
@@ -427,7 +807,6 @@ class JobsList extends BaseEl {
     const modalContent = this.resultModal.querySelector('.result-content').innerHTML;
     const printWindow = window.open('', '', 'height=600,width=800');
     printWindow.document.write('<html><head><title>Job Result</title>');
-    // Optional: Add some basic styling for printing
     printWindow.document.write('<style>');
     printWindow.document.write('body { font-family: sans-serif; } pre { white-space: pre-wrap; }');
     printWindow.document.write('</style>');
@@ -435,117 +814,174 @@ class JobsList extends BaseEl {
     printWindow.document.write(modalContent);
     printWindow.document.write('</body></html>');
     printWindow.document.close();
-    printWindow.focus(); // Necessary for some browsers
+    printWindow.focus();
     printWindow.print();
     printWindow.close();
   }
 
   async showJobResult(jobId) {
-     try {
-         const modalId = "job-output";
-         if (!this.resultModal) {
-             this.resultModal = document.getElementById(modalId);
-         }
- 
-         if (!this.resultModal) {
-             this.resultModal = document.createElement('dialog');
-             this.resultModal.id = modalId;
-             document.body.appendChild(this.resultModal);
-             this.resultModal.addEventListener('click', (e) => {
-                 if (e.target === this.resultModal) {
-                     this.resultModal.close();
-                 }
-             });
-         }
- 
-         this.resultModal.className = 'modal-content';
-         this.resultModal.innerHTML = `
-           <div class="modal-header">
-             <h3>Job Result</h3>
-             <div>
-                 <button class="print-btn">Print</button>
-                 <button class="close-modal">&times;</button>
-             </div>
-           </div>
-           <div class="result-content"></div>
-         `;
- 
-         this.resultModal.querySelector('.close-modal').addEventListener('click', () => this.resultModal.close());
-         this.resultModal.querySelector('.print-btn').addEventListener('click', () => this.printJobResult());
- 
-         const response = await fetch(`/api/jobs/${jobId}`);
-         if (response.ok) {
-             const jobData = await response.json();
-             this.ensureMarkedJsLoaded();
-             const result = jobData.result || 'No result available';
-             const resultContent = this.resultModal.querySelector('.result-content');
-             const isMarkdown = this.looksLikeMarkdown(result);
- 
-             if (isMarkdown) {
-                 try {
-                     if (window.marked) {
-                         resultContent.innerHTML = '';
-                         const markdownDiv = document.createElement('div');
-                         markdownDiv.className = 'markdown-result';
-                         markdownDiv.innerHTML = marked.parse(result);
-                         resultContent.appendChild(markdownDiv);
-                     } else {
-                         resultContent.innerHTML = result;
-                         console.warn('Marked.js not available for markdown rendering');
-                     }
-                 } catch (error) {
-                     console.error('Error parsing markdown:', error);
-                     resultContent.innerHTML = result;
-                 }
-             } else {
-                 resultContent.innerHTML = result;
-             }
- 
-             this.resultModal.showModal();
-         } else {
-             console.error(`Error fetching job result for ${jobId}:`, await response.json());
-         }
-     } catch (error) {
-         console.error('Error showing job result:', error);
-     }
+    try {
+      const modalId = "job-output";
+      if (!this.resultModal) {
+        this.resultModal = document.getElementById(modalId);
+      }
+
+      if (!this.resultModal) {
+        this.resultModal = document.createElement('dialog');
+        this.resultModal.id = modalId;
+        document.body.appendChild(this.resultModal);
+        this.resultModal.addEventListener('click', (e) => {
+          if (e.target === this.resultModal) {
+            this.resultModal.close();
+          }
+        });
+      }
+
+      this.resultModal.className = 'modal-content';
+      this.resultModal.innerHTML = `
+        <div class="modal-header">
+          <h3>Job Result</h3>
+          <div>
+            <button class="print-btn">Print</button>
+            <button class="close-modal">&times;</button>
+          </div>
+        </div>
+        <div class="result-content"></div>
+      `;
+
+      this.resultModal.querySelector('.close-modal').addEventListener('click', () => this.resultModal.close());
+      this.resultModal.querySelector('.print-btn').addEventListener('click', () => this.printJobResult());
+
+      const response = await fetch(`/api/jobs/${jobId}`);
+      if (response.ok) {
+        const jobData = await response.json();
+        this.ensureMarkedJsLoaded();
+        const result = jobData.result || 'No result available';
+        const resultContent = this.resultModal.querySelector('.result-content');
+        const isMarkdown = this.looksLikeMarkdown(result);
+
+        if (isMarkdown) {
+          try {
+            if (window.marked) {
+              resultContent.innerHTML = '';
+              const markdownDiv = document.createElement('div');
+              markdownDiv.className = 'markdown-result';
+              markdownDiv.innerHTML = marked.parse(result);
+              resultContent.appendChild(markdownDiv);
+            } else {
+              resultContent.innerHTML = result;
+              console.warn('Marked.js not available for markdown rendering');
+            }
+          } catch (error) {
+            console.error('Error parsing markdown:', error);
+            resultContent.innerHTML = result;
+          }
+        } else {
+          resultContent.innerHTML = result;
+        }
+
+        this.resultModal.showModal();
+      } else {
+        console.error(`Error fetching job result for ${jobId}:`, await response.json());
+      }
+    } catch (error) {
+      console.error('Error showing job result:', error);
+    }
   }
-  
+
   ensureMarkedJsLoaded() {
-    if (window.marked) return; // Already loaded
+    if (window.marked) return;
     
-    // Check if script is already being loaded
     if (document.querySelector('script[src*="marked"]')) return;
     
-    // Create and append the script
     const script = document.createElement('script');
     script.src = 'https://cdn.jsdelivr.net/npm/marked/marked.min.js';
     script.async = true;
     script.onload = () => {
       console.log('Marked.js loaded successfully');
-      // Configure marked options if needed
       if (window.marked) {
-        marked.setOptions({ breaks: true }); // Enable GitHub Flavored Markdown
+        marked.setOptions({ breaks: true });
       }
     };
     document.head.appendChild(script);
   }
-  
+
   looksLikeMarkdown(text) {
     if (!text || typeof text !== 'string') return false;
     
-    // Check for common markdown patterns
     const markdownPatterns = [
-      /^#+ .*$/m,                // Headers
-      /\*\*.*\*\*/,              // Bold
-      /\*.*\*/,                  // Italic
-      /\[.*\]\(.*\)/,            // Links
-      /^- .*$/m,                 // Unordered lists
-      /^\d+\. .*$/m,             // Ordered lists
-      /^```[\s\S]*?```$/m,       // Code blocks
-      /^>.*$/m                   // Blockquotes
+      /^#+ .*$/m,
+      /\*\*.*\*\*/,
+      /\*.*\*/,
+      /\[.*\]\(.*\)/,
+      /^- .*$/m,
+      /^\d+\. .*$/m,
+      /^```[\s\S]*?```$/m,
+      /^>.*$/m
     ];
     
     return markdownPatterns.some(pattern => pattern.test(text));
+  }
+
+  async showTokenCounts(jobId) {
+    try {
+      const modalId = "token-counts";
+      if (!this.tokenModal) {
+        this.tokenModal = document.getElementById(modalId);
+      }
+
+      if (!this.tokenModal) {
+        this.tokenModal = document.createElement('dialog');
+        this.tokenModal.id = modalId;
+        document.body.appendChild(this.tokenModal);
+        this.tokenModal.addEventListener('click', (e) => {
+          if (e.target === this.tokenModal) {
+            this.tokenModal.close();
+          }
+        });
+      }
+
+      this.tokenModal.className = 'modal-content';
+      this.tokenModal.innerHTML = `
+        <div class="modal-header">
+          <h3>Token Analysis - Job ${jobId}</h3>
+          <button class="close-modal">&times;</button>
+        </div>
+        <div class="token-content">
+          <div class="loading-indicator">
+            <div class="spinner"></div>
+            <p>Loading token analysis...</p>
+          </div>
+        </div>
+      `;
+
+      this.tokenModal.querySelector('.close-modal').addEventListener('click', () => this.tokenModal.close());
+      this.tokenModal.showModal();
+
+      // Fetch token data
+      const response = await fetch(`/api/jobs/${jobId}/tokens`);
+      const tokenContent = this.tokenModal.querySelector('.token-content');
+      
+      if (response.ok) {
+        const data = await response.json();
+        const hierarchy = data.hierarchy;
+        
+        if (hierarchy) {
+          // Create and insert the token tree component
+          const tokenTree = document.createElement('token-tree');
+          tokenTree.hierarchy = hierarchy;
+          tokenContent.innerHTML = '';
+          tokenContent.appendChild(tokenTree);
+        } else {
+          tokenContent.innerHTML = '<div class="error-message">No hierarchical token data available</div>';
+        }
+      } else {
+        const errorData = await response.json();
+        tokenContent.innerHTML = `<div class="error-message">Error loading token data: ${errorData.error}</div>`;
+      }
+    } catch (error) {
+      console.error('Error showing token counts:', error);
+    }
   }
 
   _render() {
@@ -595,6 +1031,7 @@ class JobsList extends BaseEl {
                   <th class="col-created">Created</th>
                   <th class="col-instructions">Instructions</th>
                   <th class="col-result">Result/Session</th>
+                  <th class="col-tokens">Tokens</th>
                 </tr>
               </thead>
               <tbody>
@@ -616,10 +1053,11 @@ class JobsList extends BaseEl {
                     <td>${this.formatDate(job.created_at)}</td>
                     <td><span class="truncate" title="${job.instructions}">${job.instructions}</span></td>
                     <td>
-                      ${html`
-                        <span class="clickable" @click=${() => this.showJobResult(job.id)}>View Result</span>
+                      <span class="clickable" @click=${() => this.showJobResult(job.id)}>View Result</span>
                       <a href="/session/${job.agent_name}/${job.id}" class="job-link" target="_blank">View Session</a>
-                      `}
+                    </td>
+                    <td>
+                      <button class="token-btn" @click=${() => this.showTokenCounts(job.id)}>Token Tree</button>
                     </td>
                   </tr>
                 `)}

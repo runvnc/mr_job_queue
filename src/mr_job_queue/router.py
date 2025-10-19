@@ -16,6 +16,7 @@ from .helpers import sanitize_job_type
 # Assuming main still provides add_job service
 from .main import add_job
 
+from lib.chatlog import count_tokens_for_log_id
 router = APIRouter()
 
 @router.get("/jobs", include_in_schema=False)
@@ -239,4 +240,29 @@ async def get_stats(request: Request, user=Depends(require_user)):
                 
         return JSONResponse(stats)
     except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+@router.get("/api/jobs/{job_id}/tokens")
+async def get_job_token_counts(request: Request, job_id: str, user=Depends(require_user)):
+    """Get token counts for a specific job including delegated tasks"""
+    try:
+        # Get context if available, otherwise pass None
+        context = None
+        if hasattr(request.state, 'context'):
+            context = request.state.context
+            
+        # Get the job to verify it exists and get the log_id
+        job = await get_job_status(job_id, context=context)
+        if "error" in job and job['error'] is not None:
+            return JSONResponse({"error": job["error"]}, status_code=404)
+        
+        # Use the job_id as the log_id for token counting
+        token_counts = await count_tokens_for_log_id(job_id, user=user.username, hierarchical=True)
+        
+        if token_counts is None:
+            return JSONResponse({"error": f"No token data found for job {job_id}"}, status_code=404)
+        
+        return JSONResponse({"status": "ok", "hierarchy": token_counts.get("hierarchy")})
+    except Exception as e:
+        print(f"Error getting token counts for job {job_id}: {e}")
         return JSONResponse({"error": str(e)}, status_code=500)
