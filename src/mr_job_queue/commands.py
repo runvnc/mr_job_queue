@@ -226,6 +226,8 @@ async def search_jobs(
         limit=10000,  # Large limit to get all potential matches
         context=context
     )
+    print(f"[search_jobs] Retrieved {len(all_jobs)} jobs for initial filtering")
+    print(all_jobs)
     
     # Apply additional filters
     filtered_jobs = []
