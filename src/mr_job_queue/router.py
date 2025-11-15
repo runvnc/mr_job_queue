@@ -65,7 +65,7 @@ async def search_jobs_endpoint(
         # Extract metadata from query parameters
         # Any query param that is not a standard search parameter is treated as metadata
         query_params = dict(request.query_params)
-        known_params = {'api_key', 'metadata_query', 'before_date', 'after_date', 
+        known_params = {'api_key', 'metadata_query', 'before_date', 'after_date', 'username',
                        'status', 'job_type', 'limit', 'offset'}
         
         # Build metadata dict from unknown parameters
@@ -78,7 +78,10 @@ async def search_jobs_endpoint(
         if metadata_query:
             try:
                 parsed_metadata = json.loads(metadata_query)
-                metadata_dict.update(parsed_metadata)
+                # Filter out known_params from parsed metadata_query
+                for key, value in parsed_metadata.items():
+                    if key not in known_params:
+                        metadata_dict[key] = value
             except json.JSONDecodeError:
                 return JSONResponse({"error": "Invalid metadata_query format"}, status_code=400)
         
