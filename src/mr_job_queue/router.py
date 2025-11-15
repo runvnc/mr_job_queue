@@ -134,7 +134,7 @@ async def get_job(request: Request, job_id: str, user=Depends(require_user)):
 async def create_job(
     request: Request,
     instructions: str = Form(...),
-    agent_name: str = Form(...),
+    agent: str = Form(...),
     metadata: Optional[str] = Form(None),
     job_type: Optional[str] = Form(None),
     files: List[UploadFile] = File([]),
@@ -179,7 +179,7 @@ async def create_job(
         # Submit the job
         result = await add_job(
             instructions=instructions,
-            agent_name=agent_name,
+            agent_name=agent,
             job_type=job_type,
             metadata=metadata_dict,
             username=user.username,
@@ -334,8 +334,10 @@ async def get_job_token_counts(request: Request, job_id: str, user=Depends(requi
 @router.post("/api/jobs/bulk")
 async def create_bulk_jobs(
     request: Request,
-    instructions_list: str = Form(...),
-    agent_name: str = Form(...),
+    instructions: List[str] = Form(None),
+    instructions_file: Optional[UploadFile] = File(None),
+    instructions_csv: Optional[str] = Form(None),
+    agent: str = Form(...),
     metadata: Optional[str] = Form(None),
     job_type: Optional[str] = Form(None),
     files: List[UploadFile] = File([]),
@@ -348,13 +350,36 @@ async def create_bulk_jobs(
         if hasattr(request.state, 'context'):
             context = request.state.context
         
-        # Parse instructions list
-        try:
-            instructions_data = json.loads(instructions_list)
-            if not isinstance(instructions_data, list):
-                return JSONResponse({"error": "instructions_list must be a JSON array"}, status_code=400)
-        except json.JSONDecodeError:
-            return JSONResponse({"error": "Invalid instructions_list format"}, status_code=400)
+        # Determine which instruction format was provided
+        instructions_data = None
+        
+        if instructions:
+            # Form field list (multiple -F "instructions=...")
+            instructions_data = instructions
+        elif instructions_file:
+            # File upload with one instruction per line
+            content = await instructions_file.read()
+            text = content.decode('utf-8')
+            instructions_data = [line.strip() for line in text.split('\n') if line.strip()]
+        elif instructions_csv:
+            # CSV format
+            instructions_data = [instr.strip() for instr in instructions_csv.split(',') if instr.strip()]
+        else:
+            return JSONResponse({"error": "No instructions provided. Use instructions, instructions_file, or instructions_csv"}, status_code=400)
+        
+        # Validate instructions
+        if not isinstance(instructions_data, list):
+            return JSONResponse({"error": "Instructions must be a list"}, status_code=400)
+        
+        if len(instructions_data) == 0:
+            return JSONResponse({"error": "Instructions list cannot be empty"}, status_code=400)
+        
+        # Validate all instructions are strings
+        for i, instr in enumerate(instructions_data):
+            if not isinstance(instr, str):
+                return JSONResponse({"error": f"Instruction at index {i} must be a string"}, status_code=400)
+            if not instr.strip():
+                return JSONResponse({"error": f"Instruction at index {i} cannot be empty"}, status_code=400)
         
         # Parse metadata if provided
         metadata_dict = None
@@ -392,7 +417,7 @@ async def create_bulk_jobs(
             
             result = await add_job(
                 instructions=instructions,
-                agent_name=agent_name,
+                agent_name=agent,
                 job_type=job_type,
                 metadata=metadata_dict,
                 username=user.username,
