@@ -266,3 +266,139 @@ async def get_job_token_counts(request: Request, job_id: str, user=Depends(requi
     except Exception as e:
         print(f"Error getting token counts for job {job_id}: {e}")
         return JSONResponse({"error": str(e)}, status_code=500)
+
+@router.post("/api/jobs/bulk")
+async def create_bulk_jobs(
+    request: Request,
+    instructions_list: str = Form(...),
+    agent_name: str = Form(...),
+    metadata: Optional[str] = Form(None),
+    job_type: Optional[str] = Form(None),
+    files: List[UploadFile] = File([]),
+    user=Depends(require_user)
+):
+    """Submit multiple jobs with the same parameters but different instructions"""
+    try:
+        # Get context if available
+        context = None
+        if hasattr(request.state, 'context'):
+            context = request.state.context
+        
+        # Parse instructions list
+        try:
+            instructions_data = json.loads(instructions_list)
+            if not isinstance(instructions_data, list):
+                return JSONResponse({"error": "instructions_list must be a JSON array"}, status_code=400)
+        except json.JSONDecodeError:
+            return JSONResponse({"error": "Invalid instructions_list format"}, status_code=400)
+        
+        # Parse metadata if provided
+        metadata_dict = None
+        if metadata:
+            try:
+                metadata_dict = json.loads(metadata)
+            except json.JSONDecodeError:
+                return JSONResponse({"error": "Invalid metadata format"}, status_code=400)
+        
+        # Handle file uploads if any
+        uploaded_files = []
+        if files:
+            upload_dir = os.path.join("data", "uploads")
+            os.makedirs(upload_dir, exist_ok=True)
+            
+            for file in files:
+                file_path = os.path.join(upload_dir, file.filename)
+                content = await file.read()
+                async with aiofiles.open(file_path, "wb") as f:
+                    await f.write(content)
+                uploaded_files.append(file_path)
+        
+        # Add uploaded files to metadata
+        if uploaded_files:
+            if not metadata_dict:
+                metadata_dict = {}
+            metadata_dict["uploaded_files"] = uploaded_files
+        
+        # Submit each job
+        results = []
+        for i, instructions in enumerate(instructions_data):
+            if not isinstance(instructions, str):
+                results.append({"index": i, "error": "Instructions must be a string"})
+                continue
+            
+            result = await add_job(
+                instructions=instructions,
+                agent_name=agent_name,
+                job_type=job_type,
+                metadata=metadata_dict,
+                username=user.username,
+                context=context
+            )
+            
+            if "error" in result:
+                results.append({"index": i, "error": result["error"]})
+            else:
+                results.append({"index": i, "job_id": result.get("job_id"), "status": "queued"})
+        
+        return JSONResponse({
+            "success": True,
+            "submitted_count": len([r for r in results if "job_id" in r]),
+            "failed_count": len([r for r in results if "error" in r]),
+            "results": results
+        })
+    except Exception as e:
+        print(f"Error in bulk job submission: {e}")
+        print(traceback.format_exc())
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+@router.get("/api/jobs/search")
+async def search_jobs_endpoint(
+    request: Request,
+    metadata_query: Optional[str] = None,
+    before_date: Optional[str] = None,
+    after_date: Optional[str] = None,
+    status: Optional[str] = None,
+    job_type: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+    user=Depends(require_user)
+):
+    """Search jobs with metadata filtering and date range"""
+    try:
+        # Get context if available
+        context = None
+        if hasattr(request.state, 'context'):
+            context = request.state.context
+        
+        # Parse metadata_query if provided
+        metadata_dict = None
+        if metadata_query:
+            try:
+                metadata_dict = json.loads(metadata_query)
+            except json.JSONDecodeError:
+                return JSONResponse({"error": "Invalid metadata_query format"}, status_code=400)
+        
+        # Admins see all jobs, others see only their own
+        username_filter = None if 'admin' in getattr(user, 'roles', []) else user.username
+        
+        # Import the search_jobs command
+        from .commands import search_jobs
+        
+        # Perform search
+        result = await search_jobs(
+            metadata_query=metadata_dict,
+            before_date=before_date,
+            after_date=after_date,
+            status=status,
+            job_type=job_type,
+            username=username_filter,
+            limit=limit,
+            offset=offset,
+            context=context
+        )
+        
+        return JSONResponse(result)
+    except Exception as e:
+        print(f"Error in job search: {e}")
+        print(traceback.format_exc())
+        return JSONResponse({"error": str(e)}, status_code=500)

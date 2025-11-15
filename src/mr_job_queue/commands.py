@@ -18,6 +18,7 @@ DEFAULT_JOB_TYPE = "default"
 
 # Helpers from mr_job_queue.helpers
 from .helpers import get_job_data, sanitize_job_type
+from typing import Dict, Any, Optional
 
 # ---------------------------------------------------------------------------
 # submit_job – thin wrapper around service_manager.add_job
@@ -184,3 +185,90 @@ async def cleanup_jobs(status="completed", older_than_days:int=30, context=None)
             except FileNotFoundError:
                 continue
     return {"removed_count":removed}
+
+# ---------------------------------------------------------------------------
+# search_jobs – search jobs with metadata filtering and date range
+# ---------------------------------------------------------------------------
+@command()
+async def search_jobs(
+    metadata_query: Optional[Dict[str, Any]] = None,
+    before_date: Optional[str] = None,
+    after_date: Optional[str] = None,
+    status: Optional[str] = None,
+    job_type: Optional[str] = None,
+    username: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+    context=None
+):
+    """Search jobs with flexible filtering on metadata, dates, and other fields.
+    
+    metadata_query: Dict of metadata field values to match (AND logic)
+    before_date: ISO format date string (jobs created before this date)
+    after_date: ISO format date string (jobs created after this date)
+    status: queued|active|completed|failed|None (all)
+    job_type: filter by job type
+    username: filter by creator
+    limit: max results to return
+    offset: number of results to skip (for pagination)
+    """
+    from datetime import datetime
+    
+    # Parse date strings to datetime objects for comparison
+    before_dt = datetime.fromisoformat(before_date) if before_date else None
+    after_dt = datetime.fromisoformat(after_date) if after_date else None
+    
+    # Get all jobs matching status/job_type/username filters (no limit to get all matches)
+    all_jobs = await get_jobs(
+        status=status, 
+        job_type=job_type, 
+        username=username, 
+        limit=10000,  # Large limit to get all potential matches
+        context=context
+    )
+    
+    # Apply additional filters
+    filtered_jobs = []
+    for job in all_jobs:
+        # Skip if no created_at timestamp
+        created_at_str = job.get("created_at")
+        if not created_at_str:
+            continue
+            
+        try:
+            job_created_dt = datetime.fromisoformat(created_at_str)
+        except ValueError:
+            continue
+        
+        # Date range filtering
+        if before_dt and job_created_dt >= before_dt:
+            continue
+        if after_dt and job_created_dt <= after_dt:
+            continue
+        
+        # Metadata field matching
+        if metadata_query:
+            job_metadata = job.get("metadata", {}) or {}
+            match = True
+            for key, value in metadata_query.items():
+                if job_metadata.get(key) != value:
+                    match = False
+                    break
+            if not match:
+                continue
+        
+        filtered_jobs.append(job)
+    
+    # Sort by created_at descending (newest first)
+    filtered_jobs.sort(key=lambda j: j.get("created_at", ""), reverse=True)
+    
+    # Apply pagination
+    total_count = len(filtered_jobs)
+    paginated_jobs = filtered_jobs[offset:offset + limit]
+    
+    return {
+        "jobs": paginated_jobs,
+        "total_count": total_count,
+        "offset": offset,
+        "limit": limit
+    }
