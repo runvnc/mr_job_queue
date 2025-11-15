@@ -113,7 +113,7 @@ async def search_jobs_endpoint(
             # Return array of [instructions, result] pairs
             simplified = []
             for job in result['jobs']:
-                simplified.append([job.get('instructions', ''), job.get('result', '')])
+                simplified.append([job.get('instructions', ''), job.get('status', ''), job.get('result', '')])
             return JSONResponse(simplified)
         
         return JSONResponse(result)
