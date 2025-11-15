@@ -227,8 +227,8 @@ async def search_jobs(
         context=context
     )
     print(f"[search_jobs] Retrieved {len(all_jobs)} jobs for initial filtering")
-    print(all_jobs)
-    
+    #print(all_jobs)
+    print(f"[search_jobs] metadata_query: {metadata_query}")
     # Apply additional filters
     filtered_jobs = []
     for job in all_jobs:
@@ -240,12 +240,15 @@ async def search_jobs(
         try:
             job_created_dt = datetime.fromisoformat(created_at_str)
         except ValueError:
+            print(f"[search_jobs] Invalid created_at format for job {job.get('job_id')}: {created_at_str}")
             continue
         
         # Date range filtering
         if before_dt and job_created_dt >= before_dt:
+            print(f"[search_jobs] Skipping job {job.get('job_id')} created at {job_created_dt} (after before_date)")
             continue
         if after_dt and job_created_dt <= after_dt:
+            print(f"[search_jobs] Skipping job {job.get('job_id')} created at {job_created_dt} (before after_date)")
             continue
         
         # Metadata field matching
@@ -254,9 +257,11 @@ async def search_jobs(
             match = True
             for key, value in metadata_query.items():
                 if job_metadata.get(key) != value:
+                    print(f"[search_jobs] Skipping job {job.get('job_id')} due to metadata mismatch on key '{key}': expected '{value}', found '{job_metadata.get(key)}'")
                     match = False
                     break
             if not match:
+                
                 continue
         
         filtered_jobs.append(job)
