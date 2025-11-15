@@ -217,7 +217,7 @@ async def search_jobs(
     # Parse date strings to datetime objects for comparison
     before_dt = datetime.fromisoformat(before_date) if before_date else None
     after_dt = datetime.fromisoformat(after_date) if after_date else None
-    
+    print(f"[search_jobs] Filters - before: {before_dt}, after: {after_dt}, status: {status}, job_type: {job_type}, username: {username}, metadata_query: {metadata_query}")
     # Get all jobs matching status/job_type/username filters (no limit to get all matches)
     all_jobs = await get_jobs(
         status=status, 

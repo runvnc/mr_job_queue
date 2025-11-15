@@ -47,6 +47,59 @@ async def list_jobs(request: Request, status: str = None, job_type: str = None, 
         print(e)
         return JSONResponse({"error": str(e)}, status_code=500)
 
+
+@router.get("/api/jobs/search")
+async def search_jobs_endpoint(
+    request: Request,
+    metadata_query: Optional[str] = None,
+    before_date: Optional[str] = None,
+    after_date: Optional[str] = None,
+    status: Optional[str] = None,
+    job_type: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+    user=Depends(require_user)
+):
+    """Search jobs with metadata filtering and date range"""
+    try:
+        # Get context if available
+        context = None
+        if hasattr(request.state, 'context'):
+            context = request.state.context
+        
+        # Parse metadata_query if provided
+        metadata_dict = None
+        if metadata_query:
+            try:
+                metadata_dict = json.loads(metadata_query)
+            except json.JSONDecodeError:
+                return JSONResponse({"error": "Invalid metadata_query format"}, status_code=400)
+        
+        # Admins see all jobs, others see only their own
+        username_filter = None if 'admin' in getattr(user, 'roles', []) else user.username
+        
+        # Import the search_jobs command
+        from .commands import search_jobs
+        
+        # Perform search
+        result = await search_jobs(
+            metadata_query=metadata_dict,
+            before_date=before_date,
+            after_date=after_date,
+            status=status,
+            job_type=job_type,
+            username=username_filter,
+            limit=limit,
+            offset=offset,
+            context=context
+        )
+        
+        return JSONResponse(result)
+    except Exception as e:
+        print(f"Error in job search: {e}")
+        print(traceback.format_exc())
+        return JSONResponse({"error": str(e)}, status_code=500)
+
 @router.get("/api/jobs/{job_id}")
 async def get_job(request: Request, job_id: str, user=Depends(require_user)):
     """Get details for a specific job"""
@@ -351,54 +404,4 @@ async def create_bulk_jobs(
         print(traceback.format_exc())
         return JSONResponse({"error": str(e)}, status_code=500)
 
-@router.get("/api/jobs/search")
-async def search_jobs_endpoint(
-    request: Request,
-    metadata_query: Optional[str] = None,
-    before_date: Optional[str] = None,
-    after_date: Optional[str] = None,
-    status: Optional[str] = None,
-    job_type: Optional[str] = None,
-    limit: int = 50,
-    offset: int = 0,
-    user=Depends(require_user)
-):
-    """Search jobs with metadata filtering and date range"""
-    try:
-        # Get context if available
-        context = None
-        if hasattr(request.state, 'context'):
-            context = request.state.context
-        
-        # Parse metadata_query if provided
-        metadata_dict = None
-        if metadata_query:
-            try:
-                metadata_dict = json.loads(metadata_query)
-            except json.JSONDecodeError:
-                return JSONResponse({"error": "Invalid metadata_query format"}, status_code=400)
-        
-        # Admins see all jobs, others see only their own
-        username_filter = None if 'admin' in getattr(user, 'roles', []) else user.username
-        
-        # Import the search_jobs command
-        from .commands import search_jobs
-        
-        # Perform search
-        result = await search_jobs(
-            metadata_query=metadata_dict,
-            before_date=before_date,
-            after_date=after_date,
-            status=status,
-            job_type=job_type,
-            username=username_filter,
-            limit=limit,
-            offset=offset,
-            context=context
-        )
-        
-        return JSONResponse(result)
-    except Exception as e:
-        print(f"Error in job search: {e}")
-        print(traceback.format_exc())
-        return JSONResponse({"error": str(e)}, status_code=500)
+
