@@ -65,7 +65,7 @@ async def search_jobs_endpoint(
         # Extract metadata from query parameters
         # Any query param that is not a standard search parameter is treated as metadata
         query_params = dict(request.query_params)
-        known_params = {'api_key', 'metadata_query', 'before_date', 'after_date', 'username',
+        known_params = {'api_key', 'metadata_query', 'before_date', 'after_date', 'username', 'output',
                        'status', 'job_type', 'limit', 'offset'}
         
         # Build metadata dict from unknown parameters
@@ -107,6 +107,14 @@ async def search_jobs_endpoint(
             offset=offset,
             context=context
         )
+        
+        # Check for simplified output format
+        if query_params.get('output') == 'results':
+            # Return array of [instructions, result] pairs
+            simplified = []
+            for job in result['jobs']:
+                simplified.append([job.get('instructions', ''), job.get('result', '')])
+            return JSONResponse(simplified)
         
         return JSONResponse(result)
     except Exception as e:
