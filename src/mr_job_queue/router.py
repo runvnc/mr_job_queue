@@ -62,19 +62,30 @@ async def search_jobs_endpoint(
 ):
     """Search jobs with metadata filtering and date range"""
     try:
+        # Extract metadata from query parameters
+        # Any query param that is not a standard search parameter is treated as metadata
+        query_params = dict(request.query_params)
+        known_params = {'api_key', 'metadata_query', 'before_date', 'after_date', 
+                       'status', 'job_type', 'limit', 'offset'}
+        
+        # Build metadata dict from unknown parameters
+        metadata_dict = {}
+        for key, value in query_params.items():
+            if key not in known_params:
+                metadata_dict[key] = value
+        
+        # Also parse metadata_query if provided (for backward compatibility)
+        if metadata_query:
+            try:
+                parsed_metadata = json.loads(metadata_query)
+                metadata_dict.update(parsed_metadata)
+            except json.JSONDecodeError:
+                return JSONResponse({"error": "Invalid metadata_query format"}, status_code=400)
+        
         # Get context if available
         context = None
         if hasattr(request.state, 'context'):
             context = request.state.context
-        
-        # Parse metadata_query if provided
-        metadata_dict = None
-        if metadata_query:
-            try:
-                metadata_dict = json.loads(metadata_query)
-            except json.JSONDecodeError:
-                return JSONResponse({"error": "Invalid metadata_query format"}, status_code=400)
-        
         # Admins see all jobs, others see only their own
         username_filter = None if 'admin' in getattr(user, 'roles', []) else user.username
         
