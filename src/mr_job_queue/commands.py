@@ -68,8 +68,11 @@ class JobCache:
             else:
                 # Remove all entries matching this status
                 keys_to_remove = [k for k in self._cache.keys() if k.startswith(f"{status}:")]
+                # ALSO remove entries for "None" (ALL) status, as they include this status
+                keys_to_remove.extend([k for k in self._cache.keys() if k.startswith("None:")])
                 for key in keys_to_remove:
-                    del self._cache[key]
+                    if key in self._cache:
+                        del self._cache[key]
     
     async def extend_ttl(self):
         """Extend the TTL of all current cache entries."""
@@ -128,11 +131,16 @@ class JobCache:
                     await self.extend_ttl()
                     continue
 
+                # Files changed - invalidate all existing cache to prevent stale reads
+                # for queries not in our common list
+                await self.invalidate()
+
                 # Refresh common queries
                 common_queries = [
                     (None, None, None, 100),  # All jobs
                     ("queued", None, None, 100),  # Queued jobs
-                    ("active", None, None, 100)  # Active jobs
+                    ("active", None, None, 100),  # Active jobs
+                    (None, None, None, 10000),  # Search jobs (large limit)
                 ]
                 
                 for status, job_type, username, limit in common_queries:
