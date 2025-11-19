@@ -71,6 +71,14 @@ class JobCache:
                 for key in keys_to_remove:
                     del self._cache[key]
     
+    async def extend_ttl(self):
+        """Extend the TTL of all current cache entries."""
+        async with self._lock:
+            now = time.time()
+            for key in self._cache:
+                _, data = self._cache[key]
+                self._cache[key] = (now, data)
+
     async def _check_if_fs_changed(self) -> bool:
         """Check if any job directories have been modified since last scan."""
         def _scan_sync():
@@ -116,6 +124,8 @@ class JobCache:
                 # Optimization: Check directory mtimes first
                 if not await self._check_if_fs_changed():
                     # No changes on disk, skip heavy JSON parsing
+                    # IMPORTANT: Extend TTL so valid data doesn't expire
+                    await self.extend_ttl()
                     continue
 
                 # Refresh common queries
