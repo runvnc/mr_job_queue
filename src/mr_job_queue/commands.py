@@ -45,6 +45,7 @@ class JobCache:
     async def get(self, status, job_type, username, limit) -> Optional[List[Dict]]:
         """Get cached jobs if available and not expired."""
         key = self._make_key(status, job_type, username, limit)
+        print(f"[JobCache] Checking cache for key: {key}")
         async with self._lock:
             if key in self._cache:
                 timestamp, data = self._cache[key]
@@ -55,6 +56,7 @@ class JobCache:
     async def set(self, status, job_type, username, limit, data: List[Dict]):
         """Cache job listing."""
         key = self._make_key(status, job_type, username, limit)
+        print(f"[JobCache] Setting cache for key: {key} with {len(data)} jobs")
         async with self._lock:
             self._cache[key] = (time.time(), data)
     
@@ -121,6 +123,9 @@ class JobCache:
                     (None, None, None, 50),  # All jobs
                     ("queued", None, None, 50),  # Queued jobs
                     ("active", None, None, 50),  # Active jobs
+                    (None, None, None, 100),  # All jobs
+                    ("queued", None, None, 100),  # Queued jobs
+                    ("active", None, None, 100)  # Active jobs
                 ]
                 
                 for status, job_type, username, limit in common_queries:
@@ -312,7 +317,9 @@ async def get_jobs(status=None, job_type=None, username=None, limit:int=50, cont
     await _job_cache.start_background_refresh()
 
     # Try cache first
+    print(f"[get_jobs] Checking cache: status={status or 'ALL'} jt={job_type or 'ALL'} user={username or 'ANY'}")
     cached = await _job_cache.get(status, job_type, username, limit)
+    print(f"[get_jobs] Cache check complete.")
     if cached is not None:
         print(f"[get_jobs] CACHE HIT: status={status or 'ALL'} jt={job_type or 'ALL'} user={username or 'ANY'} -> {len(cached)} jobs")
         return cached
