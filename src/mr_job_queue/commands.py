@@ -32,6 +32,7 @@ class JobCache:
         self._cache: Dict[str, tuple[float, List[Dict]]] = {}  # key -> (timestamp, data)
         self._lock = asyncio.Lock()
         self._refresh_task: Optional[asyncio.Task] = None
+        self._last_fs_scan_mtime: float = 0
         
     def _make_key(self, status, job_type, username, limit) -> str:
         """Generate cache key from query parameters."""
@@ -68,17 +69,53 @@ class JobCache:
                 for key in keys_to_remove:
                     del self._cache[key]
     
+    async def _check_if_fs_changed(self) -> bool:
+        """Check if any job directories have been modified since last scan."""
+        def _scan_sync():
+            """Synchronous helper to scan all mtimes without blocking event loop."""
+            max_mtime = 0.0
+            dirs_to_check = [QUEUED_DIR, ACTIVE_DIR, COMPLETED_DIR, FAILED_DIR]
+            
+            for base_dir in dirs_to_check:
+                try:
+                    if os.path.isdir(base_dir):
+                        for entry in os.scandir(base_dir):
+                            # Check mtime of the entry (file or dir)
+                            max_mtime = max(max_mtime, entry.stat().st_mtime)
+                            
+                            # If it's a directory (job type subdir), scan its children too
+                            if entry.is_dir():
+                                for sub_entry in os.scandir(entry.path):
+                                    max_mtime = max(max_mtime, sub_entry.stat().st_mtime)
+                except FileNotFoundError:
+                    continue
+                except Exception as e:
+                    print(f"[JobCache] Error checking mtime for {base_dir}: {e}")
+            return max_mtime
+
+        max_mtime = await asyncio.to_thread(_scan_sync)
+        if max_mtime > self._last_fs_scan_mtime:
+            self._last_fs_scan_mtime = max_mtime
+            return True
+        return False
+
     async def start_background_refresh(self):
         """Start background task to refresh cache periodically."""
         if self._refresh_task is None or self._refresh_task.done():
+            print("[JobCache] Starting background refresh task")
             self._refresh_task = asyncio.create_task(self._refresh_loop())
     
     async def _refresh_loop(self):
         """Background task to refresh commonly-used cache entries."""
         while True:
             try:
-                await asyncio.sleep(self.ttl_seconds / 2)  # Refresh at half TTL
+                await asyncio.sleep(5)  # Refresh every 5 seconds
                 
+                # Optimization: Check directory mtimes first
+                if not await self._check_if_fs_changed():
+                    # No changes on disk, skip heavy JSON parsing
+                    continue
+
                 # Refresh common queries
                 common_queries = [
                     (None, None, None, 50),  # All jobs
@@ -101,7 +138,7 @@ class JobCache:
                 await asyncio.sleep(5)  # Back off on error
 
 # Global cache instance
-_job_cache = JobCache(ttl_seconds=5)
+_job_cache = JobCache(ttl_seconds=15)
 
 # Start background refresh on module load
 asyncio.create_task(_job_cache.start_background_refresh())
@@ -271,6 +308,9 @@ async def get_jobs(status=None, job_type=None, username=None, limit:int=50, cont
     username    – filter by creator, None = everyone
     limit       – max completed jobs to return (others unlimited)
     """
+    # Ensure background refresh is running
+    await _job_cache.start_background_refresh()
+
     # Try cache first
     cached = await _job_cache.get(status, job_type, username, limit)
     if cached is not None:
