@@ -120,9 +120,6 @@ class JobCache:
 
                 # Refresh common queries
                 common_queries = [
-                    (None, None, None, 50),  # All jobs
-                    ("queued", None, None, 50),  # Queued jobs
-                    ("active", None, None, 50),  # Active jobs
                     (None, None, None, 100),  # All jobs
                     ("queued", None, None, 100),  # Queued jobs
                     ("active", None, None, 100)  # Active jobs
