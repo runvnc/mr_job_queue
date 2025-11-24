@@ -6,6 +6,7 @@ from lib.auth.auth import require_user
 import os
 import aiofiles
 import aiofiles.os
+import nanoid
 import json
 import traceback
 from typing import List, Optional
@@ -453,9 +454,12 @@ async def create_bulk_jobs(
                 results.append({"index": i, "error": "Instructions must be a string"})
                 continue
             
+            job_id = nanoid.generate()
+            instructions = f"Job ID: {job_id}\n{instructions}"
             result = await add_job(
                 instructions=instructions,
                 agent_name=agent,
+                job_id=job_id,
                 job_type=job_type,
                 metadata=metadata_dict,
                 username=user.username,
