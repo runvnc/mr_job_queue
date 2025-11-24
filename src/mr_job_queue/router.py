@@ -455,7 +455,7 @@ async def create_bulk_jobs(
                 continue
             
             job_id = nanoid.generate()
-            instructions = f"Job ID: {job_id}\n{instructions}"
+            instructions = f"{instructions}  (Job ID: {job_id})"
             result = await add_job(
                 instructions=instructions,
                 agent_name=agent,
