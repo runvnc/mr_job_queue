@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Request, Depends, HTTPException, File, UploadFile, Form
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+import io
 from lib.templates import render
 from lib.auth.auth import require_user
 import os
@@ -115,6 +116,32 @@ async def search_jobs_endpoint(
             for job in result['jobs']:
                 simplified.append([job.get('instructions', ''), job.get('status', ''), job.get('result', '')])
             return JSONResponse(simplified)
+        
+        # Check for CSV output format
+        if query_params.get('output') == 'csv':
+            # Generate CSV with [instructions], [status], [result] format
+            import csv
+            output = io.StringIO()
+            writer = csv.writer(output)
+            
+            # Write header
+            writer.writerow(['Instructions', 'Status', 'Result'])
+            
+            # Write data rows
+            for job in result['jobs']:
+                writer.writerow([
+                    job.get('instructions', ''),
+                    job.get('status', ''),
+                    job.get('result', '')
+                ])
+            
+            # Return CSV as streaming response
+            output.seek(0)
+            return StreamingResponse(
+                io.BytesIO(output.getvalue().encode('utf-8')),
+                media_type='text/csv',
+                headers={'Content-Disposition': 'attachment; filename="job_results.csv"'}
+            )
         
         return JSONResponse(result)
     except Exception as e:
