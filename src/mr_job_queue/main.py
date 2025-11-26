@@ -57,6 +57,10 @@ active_job_tasks = set()
 job_type_semaphores = {}
 # Dictionary to store tasks for each job type
 job_type_tasks = {}
+# Completion notification for jobs being waited on
+job_completion_events = {}   # job_id -> asyncio.Event
+job_completion_results = {}  # job_id -> result data
+
 
 # ---------------------------------------------------------------------------
 # add_job service - creates a job file in the 'queued' directory
@@ -143,14 +147,20 @@ async def process_job(job_id, job_data, job_type=None):
         instr = job_data["instructions"]
         if job_data.get('metadata'):
              instr += "\n\nMetadata:\n" + json.dumps(job_data['metadata'])
+        
+        # Get retries and parent_log_id from metadata if available
+        metadata = job_data.get('metadata', {})
+        retries = metadata.get('retries', 3)
+        parent_log_id = metadata.get('parent_log_id', None)
 
         text, _, log_id = await service_manager.run_task(
             instructions=instr,
             agent_name=job_data["agent_name"],
             user=job_data["username"],
-            retries=3,
+            retries=retries,
             llm=job_data["llm"],
             log_id=job_id,
+            parent_log_id=parent_log_id,
             context=None
         )
         
@@ -175,6 +185,11 @@ async def process_job(job_id, job_data, job_type=None):
             pass
         
         await update_job_index(job_id, "completed", sjt)
+        
+        # Signal completion to any waiters
+        if job_id in job_completion_events:
+            job_completion_results[job_id] = job_data
+            job_completion_events[job_id].set()
         return True
         
     except Exception as e:
@@ -195,7 +210,67 @@ async def process_job(job_id, job_data, job_type=None):
             await update_job_index(job_id, "failed", sjt)
         except Exception as inner_e:
             print(f"Critical Error: Failed during job failure handling for {job_id}: {inner_e}")
+        
+        # Signal completion (with failure) to any waiters
+        if job_id in job_completion_events:
+            job_completion_results[job_id] = job_data
+            job_completion_events[job_id].set()
         return False
+
+# ---------------------------------------------------------------------------
+# wait_for_job service - waits for a job to complete and returns result
+# ---------------------------------------------------------------------------
+@service()
+async def wait_for_job(job_id, timeout=600, context=None):
+    """
+    Wait for a job to complete and return its result.
+    
+    Uses event-based notification for efficiency - no polling required.
+    
+    Args:
+        job_id: The job ID to wait for
+        timeout: Maximum seconds to wait (default 600 = 10 minutes)
+        context: Optional context object
+    
+    Returns:
+        Job data dict with result on success, or dict with 'error' key on failure/timeout
+    """
+    # Check if job already completed/failed
+    job_data = await get_job_data(job_id)
+    if job_data and job_data.get("status") in ("completed", "failed"):
+        return job_data
+    
+    # Create event for this job and wait
+    event = asyncio.Event()
+    job_completion_events[job_id] = event
+    
+    try:
+        await asyncio.wait_for(event.wait(), timeout=timeout)
+        
+        # Get result from cache or filesystem
+        result = job_completion_results.pop(job_id, None)
+        if result:
+            return result
+        return await get_job_data(job_id)
+        
+    except asyncio.TimeoutError:
+        return {"error": f"Job {job_id} timed out after {timeout} seconds", "job_id": job_id, "status": "timeout"}
+    finally:
+        # Cleanup
+        job_completion_events.pop(job_id, None)
+        job_completion_results.pop(job_id, None)
+
+# ---------------------------------------------------------------------------
+# get_job_data service - retrieves job data by ID
+# ---------------------------------------------------------------------------
+@service()
+async def get_job_data_service(job_id, context=None):
+    """
+    Get job data by job ID. Searches queued, active, completed, and failed directories.
+    
+    Returns job data dict or None if not found.
+    """
+    return await get_job_data(job_id)
 
 # ---------------------------------------------------------------------------
 # Worker implementation

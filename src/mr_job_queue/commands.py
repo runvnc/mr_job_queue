@@ -2,6 +2,7 @@ import os, json, heapq, asyncio
 from datetime import datetime, timedelta
 import aiofiles
 import aiofiles.os
+import aiofiles.os
 from typing import Dict, Any, Optional, List
 import time
 
@@ -487,3 +488,104 @@ async def search_jobs(
         "offset": offset,
         "limit": limit
     }
+
+# ---------------------------------------------------------------------------
+# delegate_job - queue a job and wait for completion
+# ---------------------------------------------------------------------------
+@command()
+async def delegate_job(instructions: str, agent_name: str, job_type: str = None, retries: int = 3,
+                       timeout: int = 600, job_id: str = None, metadata: dict = None, 
+                       context=None):
+    """
+    Delegate a task to another agent via the job queue, waiting for completion.
+    
+    Unlike delegate_task which runs immediately, this queues the job and waits
+    for it to be processed by the job queue worker. This respects rate limits
+    and concurrency settings of the job queue.
+    
+    Parameters:
+        instructions: The task instructions for the agent
+        agent_name: Name of the agent to run the task
+        job_type: Optional job type for queue organization (default: "delegated.{agent_name}")
+        retries: Number of retries if task fails (default: 3) - passed to underlying run_task
+        timeout: Maximum seconds to wait for completion (default: 600 = 10 minutes)
+        job_id: Optional custom job ID (auto-generated if not provided)
+        metadata: Optional dict of metadata to attach to the job
+    
+    Returns:
+        Result from the completed job, or error message if failed/timed out
+    
+    Example:
+    
+    { "delegate_job": { 
+        "instructions": "Analyze this document and summarize key points",
+        "agent_name": "analyst",
+        "timeout": 300
+    }}
+    """
+    # Use agent_name as default job_type if not specified
+    if job_type is None:
+        job_type = f"delegated.{agent_name}"
+    
+    # Get LLM from context if available
+    llm = None
+    if context is not None:
+        if hasattr(context, 'current_model'):
+            llm = context.current_model
+        elif hasattr(context, 'data') and 'llm' in context.data:
+            llm = context.data['llm']
+    
+    # Get username from context
+    username = getattr(context, 'username', None) if context else None
+    
+    # Build metadata with retries info
+    job_metadata = metadata.copy() if metadata else {}
+    job_metadata['retries'] = retries
+    if context and hasattr(context, 'log_id'):
+        job_metadata['parent_log_id'] = context.log_id
+    
+    # Queue the job
+    result = await service_manager.add_job(
+        instructions=instructions,
+        agent_name=agent_name,
+        job_type=job_type,
+        username=username,
+        metadata=job_metadata,
+        job_id=job_id,
+        llm=llm,
+        context=context
+    )
+    
+    if "error" in result:
+        return f"Failed to queue job: {result['error']}"
+    
+    queued_job_id = result["job_id"]
+    
+    # Note: job uses job_id as log_id, so they're the same
+    # Invalidate cache for queued jobs
+    await _job_cache.invalidate("queued")
+    
+    # Wait for job completion
+    job_result = await service_manager.wait_for_job(
+        job_id=queued_job_id,
+        timeout=timeout,
+        context=context
+    )
+    
+    # Format result
+    status = job_result.get("status", "unknown")
+    if status == "completed":
+        text = job_result.get("result")
+        # Fallback for empty results - match delegate_task behavior
+        if text is None or text == '' or text == [] or text == '[]':
+            from lib.chatlog import ChatLog
+            chatlog = ChatLog(log_id=queued_job_id, user=username, agent=agent_name)
+            text = json.dumps(chatlog.messages)
+        return f'<a href="/session/{agent_name}/{queued_job_id}" target="_blank">Task completed with log ID: {queued_job_id}</a>\nResults:\n\n{text}'
+    elif status == "failed":
+        error = job_result.get("error", "Unknown error")
+        return f'Job {queued_job_id} failed: {error}'
+    elif status == "timeout":
+        return f'Job {queued_job_id} timed out after {timeout} seconds'
+    else:
+        return f'Job {queued_job_id} ended with unexpected status: {status}'
