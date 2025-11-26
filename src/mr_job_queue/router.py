@@ -112,10 +112,10 @@ async def search_jobs_endpoint(
         
         # Check for simplified output format
         if query_params.get('output') == 'results':
-            # Return array of [instructions, result] pairs
+            # Return array of [created_at, job_id, instructions, status, result]
             simplified = []
             for job in result['jobs']:
-                simplified.append([job.get('instructions', ''), job.get('status', ''), job.get('result', '')])
+                simplified.append([job.get('created_at', ''), job.get('id', ''), job.get('instructions', ''), job.get('status', ''), job.get('result', '')])
             return JSONResponse(simplified)
         
         # Check for CSV output format
@@ -126,11 +126,13 @@ async def search_jobs_endpoint(
             writer = csv.writer(output)
             
             # Write header
-            writer.writerow(['Instructions', 'Status', 'Result'])
+            writer.writerow(['Created At', 'Job ID', 'Instructions', 'Status', 'Result'])
             
             # Write data rows
             for job in result['jobs']:
                 writer.writerow([
+                    job.get('created_at', ''),
+                    job.get('id', ''),
                     job.get('instructions', ''),
                     job.get('status', ''),
                     job.get('result', '')
@@ -455,13 +457,17 @@ async def create_bulk_jobs(
                 continue
             
             job_id = nanoid.generate()
-            instructions = f"{instructions}  (Job ID: {job_id})"
+            # Create a copy of metadata for this job with the job_id
+            job_metadata = dict(metadata_dict) if metadata_dict else {}
+            job_metadata['bulk_job_id'] = job_id
+            job_metadata['bulk_index'] = i
+
             result = await add_job(
-                instructions=instructions,
+                instructions=instructions,  # Keep raw instructions
                 agent_name=agent,
                 job_id=job_id,
                 job_type=job_type,
-                metadata=metadata_dict,
+                metadata=job_metadata,
                 username=user.username,
                 context=context
             )
