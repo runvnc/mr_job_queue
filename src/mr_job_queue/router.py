@@ -380,6 +380,7 @@ async def create_bulk_jobs(
     instructions_csv: Optional[str] = Form(None),
     agent: str = Form(...),
     metadata: Optional[str] = Form(None),
+    search_key: str = Form(...),
     job_type: Optional[str] = Form(None),
     files: List[UploadFile] = File([]),
     user=Depends(require_user)
@@ -461,6 +462,7 @@ async def create_bulk_jobs(
             job_metadata = dict(metadata_dict) if metadata_dict else {}
             job_metadata['bulk_job_id'] = job_id
             job_metadata['bulk_index'] = i
+            job_metadata['search_key'] = search_key
 
             result = await add_job(
                 instructions=instructions,  # Keep raw instructions
