@@ -3,10 +3,12 @@ from datetime import datetime, timedelta
 import aiofiles
 import aiofiles.os
 import aiofiles.os
+import aiofiles.os
 from typing import Dict, Any, Optional, List
 import time
 
 from lib.providers.commands import command
+
 from lib.providers.services import service_manager
 
 # ---------------------------------------------------------------------------
@@ -17,6 +19,7 @@ QUEUED_DIR      = f"{JOB_DIR}/queued"
 ACTIVE_DIR      = f"{JOB_DIR}/active"
 COMPLETED_DIR   = f"{JOB_DIR}/completed"
 FAILED_DIR      = f"{JOB_DIR}/failed"
+PAUSED_DIR      = f"{JOB_DIR}/paused"
 DEFAULT_JOB_TYPE = "default"
 
 # Helpers from mr_job_queue.helpers
@@ -589,3 +592,240 @@ async def delegate_job(instructions: str, agent_name: str, job_type: str = None,
         return f'Job {queued_job_id} timed out after {timeout} seconds'
     else:
         return f'Job {queued_job_id} ended with unexpected status: {status}'
+
+# ---------------------------------------------------------------------------
+# pause_job - pause a queued job (prevents it from being processed)
+# ---------------------------------------------------------------------------
+@command()
+async def pause_job(job_id: str, context=None):
+    """Pause a queued job, preventing it from being processed.
+    
+    The job can be resumed later with resume_job.
+    Only queued jobs can be paused (not active or completed jobs).
+    
+    Parameters:
+    job_id - String. The ID of the job to pause.
+    
+    Returns:
+    Status of the pause operation.
+    
+    Example:
+    { "pause_job": { "job_id": "job_abc123" } }
+    """
+    jd = await get_job_data(job_id)
+    if not jd:
+        return {"error": "Job not found"}
+    
+    if jd.get("status") != "queued":
+        return {"error": f"Cannot pause job with status '{jd.get('status')}'. Only queued jobs can be paused."}
+    
+    ojt = jd.get("job_type", DEFAULT_JOB_TYPE)
+    sjt = sanitize_job_type(ojt)
+    qpath = f"{QUEUED_DIR}/{sjt}/{job_id}.json"
+    
+    if not await aiofiles.os.path.exists(qpath):
+        return {"error": "Job file missing from queue"}
+    
+    # Create paused directory if needed
+    paused_type_dir = f"{PAUSED_DIR}/{sjt}"
+    await aiofiles.os.makedirs(paused_type_dir, exist_ok=True)
+    
+    # Update job status and move to paused directory
+    jd.update({
+        "status": "paused",
+        "paused_at": datetime.now().isoformat(),
+        "updated_at": datetime.now().isoformat()
+    })
+    
+    ppath = f"{paused_type_dir}/{job_id}.json"
+    async with aiofiles.open(ppath, "w") as f:
+        await f.write(json.dumps(jd, indent=2))
+    
+    await aiofiles.os.remove(qpath)
+    
+    # Invalidate cache
+    await _job_cache.invalidate("queued")
+    
+    return {"success": True, "status": "paused", "job_id": job_id}
+
+# ---------------------------------------------------------------------------
+# resume_job - resume a paused job
+# ---------------------------------------------------------------------------
+@command()
+async def resume_job(job_id: str, context=None):
+    """Resume a paused job, putting it back in the queue.
+    
+    Parameters:
+    job_id - String. The ID of the job to resume.
+    
+    Returns:
+    Status of the resume operation.
+    
+    Example:
+    { "resume_job": { "job_id": "job_abc123" } }
+    """
+    jd = await get_job_data(job_id)
+    if not jd:
+        return {"error": "Job not found"}
+    
+    if jd.get("status") != "paused":
+        return {"error": f"Cannot resume job with status '{jd.get('status')}'. Only paused jobs can be resumed."}
+    
+    ojt = jd.get("job_type", DEFAULT_JOB_TYPE)
+    sjt = sanitize_job_type(ojt)
+    ppath = f"{PAUSED_DIR}/{sjt}/{job_id}.json"
+    
+    if not await aiofiles.os.path.exists(ppath):
+        return {"error": "Job file missing from paused directory"}
+    
+    # Update job status and move back to queued directory
+    jd.update({
+        "status": "queued",
+        "resumed_at": datetime.now().isoformat(),
+        "updated_at": datetime.now().isoformat()
+    })
+    # Remove paused_at if present
+    jd.pop("paused_at", None)
+    
+    queued_type_dir = f"{QUEUED_DIR}/{sjt}"
+    await aiofiles.os.makedirs(queued_type_dir, exist_ok=True)
+    
+    qpath = f"{queued_type_dir}/{job_id}.json"
+    async with aiofiles.open(qpath, "w") as f:
+        await f.write(json.dumps(jd, indent=2))
+    
+    await aiofiles.os.remove(ppath)
+    
+    # Invalidate cache
+    await _job_cache.invalidate("queued")
+    
+    return {"success": True, "status": "queued", "job_id": job_id}
+
+# ---------------------------------------------------------------------------
+# continue_job - create a new job to continue from a previous job
+# ---------------------------------------------------------------------------
+@command()
+async def continue_job(job_id: str, additional_instructions: str = None, context=None):
+    """Continue a job by creating a new job with the same parameters.
+    
+    This is useful for resuming work on a completed or failed job,
+    or for scheduling a job to continue at a later time.
+    
+    Parameters:
+    job_id - String. The ID of the job to continue from.
+    additional_instructions - String. Optional additional instructions to append.
+    
+    Returns:
+    The new job ID and status.
+    
+    Example:
+    { "continue_job": { "job_id": "job_abc123" } }
+    
+    Example with additional instructions:
+    { "continue_job": { 
+        "job_id": "job_abc123",
+        "additional_instructions": "Focus on the remaining items from the previous run."
+    }}
+    """
+    # Get the original job data
+    jd = await get_job_data(job_id)
+    if not jd:
+        return {"error": "Original job not found"}
+    
+    # Build new instructions
+    original_instructions = jd.get("instructions", "")
+    if additional_instructions:
+        new_instructions = f"{original_instructions}\n\n[CONTINUATION]\n{additional_instructions}"
+    else:
+        new_instructions = f"{original_instructions}\n\n[CONTINUATION]\nPlease continue from where the previous job left off."
+    
+    # Build metadata linking to original job
+    new_metadata = jd.get("metadata", {}).copy() if jd.get("metadata") else {}
+    new_metadata["continued_from"] = job_id
+    new_metadata["original_job_id"] = jd.get("metadata", {}).get("original_job_id", job_id)
+    
+    # Get username from context or original job
+    username = getattr(context, 'username', None) if context else None
+    if not username:
+        username = jd.get("username", "system")
+    
+    # Create the new job
+    result = await service_manager.add_job(
+        instructions=new_instructions,
+        agent_name=jd.get("agent_name"),
+        job_type=jd.get("job_type"),
+        username=username,
+        metadata=new_metadata,
+        llm=jd.get("llm"),
+        context=context
+    )
+    
+    if "error" in result:
+        return result
+    
+    # Invalidate cache
+    await _job_cache.invalidate("queued")
+    
+    return {
+        "success": True,
+        "new_job_id": result["job_id"],
+        "continued_from": job_id,
+        "status": "queued"
+    }
+
+# ---------------------------------------------------------------------------
+# request_job_pause - agent command to pause the current running job
+# ---------------------------------------------------------------------------
+@command()
+async def request_job_pause(reason: str = None, context=None):
+    """Request to pause the current job (for use by agents during job execution).
+    
+    This command allows an agent to pause its own job during execution.
+    The job will be moved to the paused state and will NOT be retried.
+    Use continue_job() later to resume the job.
+    
+    Parameters:
+    reason - String. Optional reason for pausing the job.
+    
+    Returns:
+    A pause confirmation that signals the job system to stop processing.
+    
+    Example:
+    { "request_job_pause": { "reason": "Waiting for external data" } }
+    
+    Example in a task flow:
+    { "request_job_pause": { "reason": "Rate limited, will continue later" } }
+    """
+    if context is None:
+        return {"error": "No context available"}
+    
+    # Get the job_id from context (log_id is used as job_id)
+    job_id = getattr(context, 'log_id', None)
+    if not job_id:
+        return {"error": "No job_id found in context"}
+    
+    # Check if this is actually a job (job IDs start with 'job_')
+    if not job_id.startswith('job_'):
+        return {"error": "This command can only be used within a job context"}
+    
+    # Set flags in context to signal pause
+    context.data['job_pause_requested'] = True
+    context.data['job_pause_reason'] = reason or "Pause requested by agent"
+    context.data['finished_conversation'] = True  # Stop the agent loop
+    
+    # Build the pause result
+    pause_result = {
+        "status": "paused",
+        "job_id": job_id,
+        "reason": reason or "Pause requested by agent",
+        "message": "Job paused. Use continue_job() to resume."
+    }
+    context.data['job_paused_result'] = pause_result  # Extra flag for process_job to detect
+    # Set task_result so the fallback in send_message_to_agent adds it to full_results
+    # with the 'output' key that results_output() looks for (prevents retries)
+    context.data['task_result'] = pause_result
+    
+    await context.save_context()
+    
+    # Return 'stop' to halt processing - the fallback will handle adding to full_results
+    return 'stop'

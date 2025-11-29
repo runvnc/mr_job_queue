@@ -12,6 +12,7 @@ import aiofiles.os
 from lib.providers.services import service, service_manager
 from lib.providers.hooks import hook
 from lib.utils.debug import debug_box
+from lib.chatcontext import get_context
 
 # Local imports
 from .filelock import FileLock
@@ -26,6 +27,7 @@ ACTIVE_DIR = f"{JOB_DIR}/active"  # Will contain job_type subdirectories
 COMPLETED_DIR = f"{JOB_DIR}/completed"  # Will contain job_type subdirectories
 DEFAULT_JOB_TYPE = "default"  # Default job type for backward compatibility
 FAILED_DIR = f"{JOB_DIR}/failed"
+PAUSED_DIR = f"{JOB_DIR}/paused"
 # Note: JOB_INDEX removed - we now scan directories directly
 
 # Concurrency settings - Read from environment variable
@@ -48,6 +50,7 @@ os.makedirs(QUEUED_DIR, exist_ok=True)
 os.makedirs(ACTIVE_DIR, exist_ok=True)
 os.makedirs(COMPLETED_DIR, exist_ok=True)
 os.makedirs(FAILED_DIR, exist_ok=True)
+os.makedirs(PAUSED_DIR, exist_ok=True)
 # Worker process state
 worker_task = None
 worker_running = asyncio.Event() # Use Event for clearer start/stop signaling
@@ -165,6 +168,37 @@ async def process_job(job_id, job_data, job_type=None):
         )
         
         print(f"Task completed for job {job_id}, log_id: {log_id}")
+        
+        # Check if the job was paused by the agent
+        try:
+            task_context = await get_context(job_id, job_data.get('username', 'system'))
+            if task_context and task_context.data.get('job_pause_requested'):
+                # Job was paused - move to paused directory instead of completed
+                pause_reason = task_context.data.get('job_pause_reason', 'Pause requested')
+                job_data.update({
+                    "status": "paused",
+                    "paused_at": datetime.now().isoformat(),
+                    "pause_reason": pause_reason,
+                    "updated_at": datetime.now().isoformat(),
+                    "result": text  # Save any partial result
+                })
+                
+                paused_path = f"{PAUSED_DIR}/{sjt}/{job_id}.json"
+                await aiofiles.os.makedirs(os.path.dirname(paused_path), exist_ok=True)
+                async with FileLock(paused_path):
+                    async with aiofiles.open(paused_path, "w") as f:
+                        await f.write(json.dumps(job_data, indent=2))
+                
+                try:
+                    await aiofiles.os.remove(active_path)
+                except FileNotFoundError:
+                    pass
+                
+                print(f"Job {job_id} paused: {pause_reason}")
+                return True  # Return success - job handled correctly
+        except Exception as e:
+            print(f"Error checking pause status for job {job_id}: {e}")
+        
         job_data.update({
             "status": "completed",
             "result": text,

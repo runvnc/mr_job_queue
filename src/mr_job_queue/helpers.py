@@ -13,6 +13,7 @@ QUEUED_DIR = f"{JOB_DIR}/queued"
 ACTIVE_DIR = f"{JOB_DIR}/active"
 COMPLETED_DIR = f"{JOB_DIR}/completed"
 FAILED_DIR = f"{JOB_DIR}/failed"
+PAUSED_DIR = f"{JOB_DIR}/paused"
 
 # ---------------------------------------------------------------------------
 # sanitize_job_type
@@ -35,7 +36,7 @@ async def update_job_index(job_id, new_status, job_type=None):
 # ---------------------------------------------------------------------------
 async def get_job_data(job_id):
     """Get a job's data from any of the job directories."""
-    for base_dir in (QUEUED_DIR, ACTIVE_DIR, COMPLETED_DIR):
+    for base_dir in (QUEUED_DIR, ACTIVE_DIR, COMPLETED_DIR, PAUSED_DIR):
         try:
             if await aiofiles.os.path.exists(base_dir):
                 for job_type_dir in await aiofiles.os.listdir(base_dir):
