@@ -348,7 +348,7 @@ class JobSubmissionForm extends BaseEl {
         finalJobType = `${this.jobType}.${this.selectedModel}`;
       }
       formData.append('job_type', finalJobType);
-      formData.append('agent_name', this.selectedAgent);
+      formData.append('agent', this.selectedAgent);
       
       if (this.selectedModel) {
         formData.append('metadata', JSON.stringify({ model: this.selectedModel }));
