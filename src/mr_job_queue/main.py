@@ -8,8 +8,10 @@ import shutil
 import traceback
 import aiofiles
 import aiofiles.os
+import httpx
 
 from lib.providers.services import service, service_manager
+from lib.providers.hooks import hook, hook_manager
 from lib.providers.hooks import hook
 from lib.utils.debug import debug_box
 from lib.chatcontext import get_context
@@ -19,6 +21,24 @@ from .filelock import FileLock
 from .helpers import get_job_data, sanitize_job_type
 
 debug_box("----------------------------------- JOB_QUEUE STARTING ----------------------------------------------------")
+
+# Configuration handling
+CONFIG_PATH = "data/jobs/config.json"
+def load_config():
+    if os.path.exists(CONFIG_PATH):
+        with open(CONFIG_PATH, 'r') as f:
+            return json.load(f)
+    return {
+        "mode": "standalone",
+        "master_url": "",
+        "max_concurrent": 5,
+        "max_concurrent_per_type": 1
+    }
+
+def save_config(config):
+    os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
+    with open(CONFIG_PATH, 'w') as f:
+        json.dump(config, f, indent=2)
 
 # Job directory structure
 JOB_DIR = "data/jobs"  # Base directory for all jobs
@@ -122,27 +142,16 @@ async def add_job(instructions, agent_name, job_type=None, username=None, metada
     return {"job_id": job_id}
 
 # ---------------------------------------------------------------------------
-# process_job service - executes the agent task for a given job
+# execute_job_core - The actual execution logic shared by local and remote workers
 # ---------------------------------------------------------------------------
-@service()
-async def process_job(job_id, job_data, job_type=None):
+async def execute_job_core(job_id, job_data):
+    """Executes the task and returns updated job_data. Does NOT handle filesystem."""
     from .helpers import update_job_index # It's a no-op, but call keeps logic flow
-    original_job_type = job_type or job_data.get("job_type", DEFAULT_JOB_TYPE)
-    sjt = sanitize_job_type(original_job_type)
-    active_path = f"{ACTIVE_DIR}/{sjt}/{job_id}.json"
-    
     try:
-        print(f"Processing job {job_id}")
         job_data["status"] = "active"
         job_data["started_at"] = datetime.now().isoformat()
         job_data["updated_at"] = datetime.now().isoformat()
-        
-        async with FileLock(active_path):
-            async with aiofiles.open(active_path, "w") as f:
-                await f.write(json.dumps(job_data, indent=2))
-        
-        await update_job_index(job_id, "active", sjt)
-        
+
         print(f"Running task for job {job_id} with agent {job_data['agent_name']}")
         if not hasattr(service_manager, 'run_task'):
              raise RuntimeError("run_task service is not available via service_manager")
@@ -182,20 +191,7 @@ async def process_job(job_id, job_data, job_type=None):
                     "updated_at": datetime.now().isoformat(),
                     "result": text  # Save any partial result
                 })
-                
-                paused_path = f"{PAUSED_DIR}/{sjt}/{job_id}.json"
-                await aiofiles.os.makedirs(os.path.dirname(paused_path), exist_ok=True)
-                async with FileLock(paused_path):
-                    async with aiofiles.open(paused_path, "w") as f:
-                        await f.write(json.dumps(job_data, indent=2))
-                
-                try:
-                    await aiofiles.os.remove(active_path)
-                except FileNotFoundError:
-                    pass
-                
-                print(f"Job {job_id} paused: {pause_reason}")
-                return True  # Return success - job handled correctly
+                return job_data
         except Exception as e:
             print(f"Error checking pause status for job {job_id}: {e}")
         
@@ -206,44 +202,61 @@ async def process_job(job_id, job_data, job_type=None):
             "completed_at": datetime.now().isoformat(),
             "updated_at": datetime.now().isoformat()
         })
+        return job_data
         
-        completed_path = f"{COMPLETED_DIR}/{sjt}/{job_id}.json"
-        await aiofiles.os.makedirs(os.path.dirname(completed_path), exist_ok=True)
-        async with FileLock(completed_path):
-            async with aiofiles.open(completed_path, "w") as f:
+    except Exception as e:
+        print(f"Error processing job {job_id}: {e}\n{traceback.format_exc()}")
+        job_data.update({
+            "status": "failed",
+            "error": f"{str(e)}\n{traceback.format_exc()}",
+            "completed_at": datetime.now().isoformat(),
+            "updated_at": datetime.now().isoformat()
+        })
+        return job_data
+
+# ---------------------------------------------------------------------------
+# process_job service - executes the agent task for a given job (Local/Master)
+# ---------------------------------------------------------------------------
+@service()
+async def process_job(job_id, job_data, job_type=None):
+    from .helpers import update_job_index
+    original_job_type = job_type or job_data.get("job_type", DEFAULT_JOB_TYPE)
+    sjt = sanitize_job_type(original_job_type)
+    active_path = f"{ACTIVE_DIR}/{sjt}/{job_id}.json"
+    
+    try:
+        # Initial update to active
+        async with FileLock(active_path):
+            async with aiofiles.open(active_path, "w") as f:
+                await f.write(json.dumps(job_data, indent=2))
+        
+        # Execute core logic
+        job_data = await execute_job_core(job_id, job_data)
+        
+        # Handle state transition on filesystem
+        status = job_data.get("status")
+        if status == "paused":
+            target_dir = PAUSED_DIR
+        elif status == "completed":
+            target_dir = COMPLETED_DIR
+        else:
+            target_dir = FAILED_DIR
+
+        target_path = f"{target_dir}/{sjt}/{job_id}.json"
+        await aiofiles.os.makedirs(os.path.dirname(target_path), exist_ok=True)
+        
+        async with FileLock(target_path):
+            async with aiofiles.open(target_path, "w") as f:
                 await f.write(json.dumps(job_data, indent=2))
         
         try:
             await aiofiles.os.remove(active_path)
-        except FileNotFoundError:
-            pass
+        except FileNotFoundError: pass
+
+        await update_job_index(job_id, status, sjt)
         
-        await update_job_index(job_id, "completed", sjt)
-        
-        # Signal completion to any waiters
-        if job_id in job_completion_events:
-            job_completion_results[job_id] = job_data
-            job_completion_events[job_id].set()
-        return True
-        
-    except Exception as e:
-        print(f"Error processing job {job_id}: {e}\n{traceback.format_exc()}")
-        try:
-            job_data.update({
-                "status": "failed",
-                "error": f"{str(e)}\n{traceback.format_exc()}",
-                "completed_at": datetime.now().isoformat(),
-                "updated_at": datetime.now().isoformat()
-            })
-            failed_path = f"{FAILED_DIR}/{job_id}.json"
-            async with FileLock(failed_path):
-                async with aiofiles.open(failed_path, "w") as f:
-                    await f.write(json.dumps(job_data, indent=2))
-            if await aiofiles.os.path.exists(active_path):
-                await aiofiles.os.remove(active_path)
-            await update_job_index(job_id, "failed", sjt)
-        except Exception as inner_e:
-            print(f"Critical Error: Failed during job failure handling for {job_id}: {inner_e}")
+        # Trigger hook
+        await hook_manager.job_ended(status, job_data, job_data.get("result"), context=None)
         
         # Signal completion (with failure) to any waiters
         if job_id in job_completion_events:
@@ -327,6 +340,53 @@ async def job_type_worker_loop(job_type):
         job_type_semaphores[job_type] = asyncio.Semaphore(MAX_CONCURRENT_PER_TYPE)
     sem = job_type_semaphores[job_type]
     
+    config = load_config()
+    if config.get("mode") == "worker":
+        await worker_remote_loop(job_type, sem, config)
+        return
+
+    await worker_local_loop(job_type, sem)
+
+async def worker_remote_loop(job_type, sem, config):
+    """Worker loop that polls a remote master."""
+    master_url = config.get("master_url", "").rstrip("/")
+    if not master_url:
+        print(f"Worker mode active but no master_url configured for {job_type}")
+        return
+
+    print(f"Remote worker loop started for {job_type} -> {master_url}")
+    
+    headers = {}
+    if config.get("api_key"):
+        headers["Authorization"] = f"Bearer {config['api_key']}"
+
+    async with httpx.AsyncClient(timeout=60.0, headers=headers) as client:
+        while worker_running.is_set():
+            try:
+                await sem.acquire()
+                # Lease a job from master
+                resp = await client.post(f"{master_url}/api/jobs/lease", json={"job_type": job_type})
+                
+                if resp.status_code == 204: # Empty
+                    sem.release()
+                    await asyncio.sleep(10)
+                    continue
+                
+                job_data = resp.json()
+                job_id = job_data["id"]
+                
+                # Process and report
+                task = asyncio.create_task(run_remote_job_and_report(job_id, job_data, sem, job_type, client, master_url))
+                active_job_tasks.add(task)
+                task.add_done_callback(active_job_tasks.discard)
+
+            except Exception as e:
+                print(f"Remote worker error: {e}")
+                await asyncio.sleep(10)
+
+async def worker_local_loop(job_type, sem):
+    """Original local filesystem scanning loop."""
+    
     print(f"Job queue worker for type '{job_type}' started (limit: {MAX_CONCURRENT_PER_TYPE})")
     queued_job_type_dir = f"{QUEUED_DIR}/{job_type}"
     active_job_type_dir = f"{ACTIVE_DIR}/{job_type}"
@@ -379,6 +439,21 @@ async def job_type_worker_loop(job_type):
         except Exception as e:
             print(f"Worker loop for '{job_type}' encountered an error: {e}")
             await asyncio.sleep(10)
+
+async def run_remote_job_and_report(job_id, job_data, sem, job_type, client, master_url):
+    """Run job locally and report result back to master."""
+    try:
+        print(f"Executing remote job {job_id}...")
+        job_data = await execute_job_core(job_id, job_data)
+        
+        print(f"Reporting remote job {job_id} back to master...")
+        resp = await client.post(f"{master_url}/api/jobs/report/{job_id}", json=job_data)
+        if not resp.is_success:
+            print(f"Failed to report job {job_id}: {resp.text}")
+    except Exception as e:
+        print(f"Error in run_remote_job_and_report: {e}")
+    finally:
+        sem.release()
     
     print(f"Job queue worker loop for type '{job_type}' finished.")
 

@@ -1036,6 +1036,24 @@ class JobsList extends BaseEl {
     }
   }
 
+  async cancelJob(jobId) {
+    if (!confirm(`Are you sure you want to cancel job ${jobId}?`)) return;
+    
+    try {
+      const response = await fetch(`/api/jobs/${jobId}`, {
+        method: 'DELETE'
+      });
+      if (response.ok) {
+        this.loadJobs();
+      } else {
+        const errorData = await response.json();
+        alert(`Error cancelling job: ${errorData.error}`);
+      }
+    } catch (error) {
+      console.error('Error cancelling job:', error);
+    }
+  }
+
   _render() {
     return html`
       <div class="jobs-container">
@@ -1106,6 +1124,11 @@ class JobsList extends BaseEl {
                     <td><span class="truncate" title="${job.instructions}">${job.instructions}</span></td>
                     <td>
                       <span class="clickable" @click=${() => this.showJobResult(job.id)}>View Result</span>
+                      ${['queued', 'active'].includes(job.status) ? html`
+                        <span class="clickable" style="color: var(--error, #f56565); margin-left: 10px;" @click=${() => this.cancelJob(job.id)}>
+                          Cancel
+                        </span>
+                      ` : ''}
                       <a href="/session/${job.agent_name}/${job.id}" class="job-link" target="_blank">View Session</a>
                     </td>
                     <td>

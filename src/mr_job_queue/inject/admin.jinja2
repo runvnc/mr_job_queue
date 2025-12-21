@@ -1,0 +1,14 @@
+{% block head %}
+<script type="module" src="/mr_job_queue/static/js/job-settings.js"></script>
+{% endblock %}
+
+{% block content %}
+<details>
+  <summary><span class="material-icons">queue</span>
+  <span>Job Queue</span>
+  </summary>
+  <div class="details-content">
+    <job-queue-settings></job-queue-settings>
+  </div>
+</details>
+{% endblock %}

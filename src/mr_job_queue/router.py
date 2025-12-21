@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Request, Depends, HTTPException, File, UploadFile, Form
+from fastapi import APIRouter, Request, Depends, HTTPException, File, UploadFile, Form, Header
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 import io
 from lib.templates import render
@@ -6,6 +6,7 @@ from lib.auth.auth import require_user
 import os
 import aiofiles
 import aiofiles.os
+from lib.providers.hooks import hook_manager
 import nanoid
 import json
 import traceback
@@ -13,10 +14,96 @@ from typing import List, Optional
 from .commands import (
     get_job_status, get_jobs, cancel_job, cleanup_jobs,
     QUEUED_DIR, ACTIVE_DIR, COMPLETED_DIR, FAILED_DIR
-, DEFAULT_JOB_TYPE)
+, DEFAULT_JOB_TYPE, JOB_DIR)
 from .helpers import sanitize_job_type
 # Assuming main still provides add_job service
 from .main import add_job
+
+async def require_admin(user=Depends(require_user)):
+    if "admin" not in getattr(user, 'roles', []):
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+@router.get("/api/config")
+async def get_job_config(_=Depends(require_admin)):
+    from .main import load_config
+    return load_config()
+
+@router.post("/api/config")
+async def update_job_config(request: Request, _=Depends(require_admin)):
+    from .main import save_config
+    config = await request.json()
+    save_config(config)
+    return {"status": "ok"}
+
+@router.post("/api/jobs/lease")
+async def lease_job(request: Request, user=Depends(require_user)):
+    """Allow a worker to lease a job from the master"""
+    data = await request.json()
+    requested_type = data.get("job_type")
+    
+    # Find a job to lease
+    target_types = [sanitize_job_type(requested_type)] if requested_type else []
+    if not target_types:
+        if os.path.exists(QUEUED_DIR):
+            target_types = [d for d in os.listdir(QUEUED_DIR) if os.path.isdir(os.path.join(QUEUED_DIR, d))]
+
+    for sjt in target_types:
+        qdir = os.path.join(QUEUED_DIR, sjt)
+        if not os.path.exists(qdir): continue
+        
+        files = sorted(os.listdir(qdir))
+        for f in files:
+            if not f.endswith(".json"): continue
+            
+            job_id = f.replace(".json", "")
+            old_path = os.path.join(qdir, f)
+            new_dir = os.path.join(ACTIVE_DIR, sjt)
+            os.makedirs(new_dir, exist_ok=True)
+            new_path = os.path.join(new_dir, f)
+            
+            try:
+                # Atomic move to claim the job
+                os.rename(old_path, new_path)
+                async with aiofiles.open(new_path, "r") as jf:
+                    job_data = json.loads(await jf.read())
+                return JSONResponse(job_data)
+            except FileNotFoundError:
+                continue # Someone else got it
+            except Exception as e:
+                print(f"Lease error: {e}")
+                continue
+                
+    return JSONResponse({"status": "empty"}, status_code=204)
+
+@router.post("/api/jobs/report/{job_id}")
+async def report_job(job_id: str, request: Request, user=Depends(require_user)):
+    """Worker reporting job result back to master"""
+    report = await request.json()
+    status = report.get("status")
+    sjt = sanitize_job_type(report.get("job_type", DEFAULT_JOB_TYPE))
+    
+    active_path = os.path.join(ACTIVE_DIR, sjt, f"{job_id}.json")
+    if not os.path.exists(active_path):
+        return JSONResponse({"error": "Job not found in active queue"}, status_code=404)
+        
+    async with aiofiles.open(active_path, "r") as f:
+        job_data = json.loads(await f.read())
+        
+    job_data.update(report)
+    job_data["updated_at"] = datetime.now().isoformat()
+    
+    target_dir = COMPLETED_DIR if status == "completed" else FAILED_DIR
+    os.makedirs(os.path.join(target_dir, sjt), exist_ok=True)
+    final_path = os.path.join(target_dir, sjt, f"{job_id}.json")
+    
+    async with aiofiles.open(final_path, "w") as f:
+        await f.write(json.dumps(job_data, indent=2))
+    
+    os.remove(active_path)
+    
+    # Trigger hook on Master
+    await hook_manager.job_ended(status, job_data, job_data.get("result"), context=None)
+    return {"status": "ok"}
 
 from lib.chatlog import count_tokens_for_log_id
 router = APIRouter()

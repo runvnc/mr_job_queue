@@ -8,6 +8,7 @@ from typing import Dict, Any, Optional, List
 import time
 
 from lib.providers.commands import command
+from lib.providers.hooks import hook_manager
 
 from lib.providers.services import service_manager
 
@@ -381,6 +382,9 @@ async def cancel_job(job_id, context=None):
     # Invalidate cache
     await _job_cache.invalidate("queued")
     await _job_cache.invalidate("failed")
+    
+    # Trigger hook
+    await hook_manager.job_ended("cancelled", jd, None, context=None)
     
     return {"success": True}
 
