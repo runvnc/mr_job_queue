@@ -262,6 +262,10 @@ async def process_job(job_id, job_data, job_type=None):
         if job_id in job_completion_events:
             job_completion_results[job_id] = job_data
             job_completion_events[job_id].set()
+    except Exception as e:
+        print(f"Error in process_job for {job_id}: {e}")
+        return False
+
         return False
 
 # ---------------------------------------------------------------------------
