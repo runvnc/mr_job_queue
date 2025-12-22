@@ -19,6 +19,8 @@ from .helpers import sanitize_job_type
 # Assuming main still provides add_job service
 from .main import add_job
 
+router = APIRouter()
+
 async def require_admin(user=Depends(require_user)):
     if "admin" not in getattr(user, 'roles', []):
         raise HTTPException(status_code=403, detail="Admin access required")
@@ -106,7 +108,6 @@ async def report_job(job_id: str, request: Request, user=Depends(require_user)):
     return {"status": "ok"}
 
 from lib.chatlog import count_tokens_for_log_id
-router = APIRouter()
 
 @router.get("/jobs", include_in_schema=False)
 async def index(request: Request, user=Depends(require_user)):
