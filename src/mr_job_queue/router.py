@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Request, Depends, HTTPException, File, UploadFile, Form, Header
+from datetime import datetime
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 import io
 from lib.templates import render
@@ -16,10 +17,23 @@ from .commands import (
     QUEUED_DIR, ACTIVE_DIR, COMPLETED_DIR, FAILED_DIR
 , DEFAULT_JOB_TYPE, JOB_DIR)
 from .helpers import sanitize_job_type
-# Assuming main still provides add_job service
+from .main import load_config, get_limits_for_type, count_active_jobs_for_type
 from .main import add_job
 
+# Import worker tracking functions
+from .main import update_worker_registry, load_workers_registry
+
 router = APIRouter()
+
+def get_client_ip(request: Request) -> str:
+    """Extract client IP, handling reverse proxies."""
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    real_ip = request.headers.get("X-Real-IP")
+    if real_ip:
+        return real_ip
+    return request.client.host if request.client else "unknown"
 
 async def require_admin(user=Depends(require_user)):
     if "admin" not in getattr(user, 'roles', []):
@@ -37,11 +51,23 @@ async def update_job_config(request: Request, _=Depends(require_admin)):
     save_config(config)
     return {"status": "ok"}
 
+@router.get("/api/workers")
+async def get_workers(_=Depends(require_admin)):
+    """Get the current workers registry"""
+    registry = load_workers_registry()
+    return JSONResponse(registry)
+
 @router.post("/api/jobs/lease")
 async def lease_job(request: Request, user=Depends(require_user)):
     """Allow a worker to lease a job from the master"""
+    config = load_config()
     data = await request.json()
     requested_type = data.get("job_type")
+    worker_id = data.get("worker_id")
+    client_ip = get_client_ip(request)
+    
+    if not worker_id:
+        return JSONResponse({"error": "worker_id required"}, status_code=400)
     
     # Find a job to lease
     target_types = [sanitize_job_type(requested_type)] if requested_type else []
@@ -52,6 +78,14 @@ async def lease_job(request: Request, user=Depends(require_user)):
     for sjt in target_types:
         qdir = os.path.join(QUEUED_DIR, sjt)
         if not os.path.exists(qdir): continue
+        
+        # Check global limit for this job type
+        limits = get_limits_for_type(sjt, config)
+        active_count = count_active_jobs_for_type(sjt)
+        if active_count >= limits["max_global"]:
+            # Global limit reached for this type, try next type or return empty
+            continue
+        
         
         files = sorted(os.listdir(qdir))
         for f in files:
@@ -66,8 +100,21 @@ async def lease_job(request: Request, user=Depends(require_user)):
             try:
                 # Atomic move to claim the job
                 os.rename(old_path, new_path)
+                
+                # Read job data and add worker tracking info
                 async with aiofiles.open(new_path, "r") as jf:
                     job_data = json.loads(await jf.read())
+                
+                job_data["assigned_worker"] = worker_id
+                job_data["assigned_worker_ip"] = client_ip
+                job_data["assigned_at"] = datetime.now().isoformat()
+                
+                async with aiofiles.open(new_path, "w") as jf:
+                    await jf.write(json.dumps(job_data, indent=2))
+                
+                # Update worker registry
+                update_worker_registry(worker_id, ip=client_ip, job_id=job_id)
+                
                 return JSONResponse(job_data)
             except FileNotFoundError:
                 continue # Someone else got it
@@ -83,6 +130,8 @@ async def report_job(job_id: str, request: Request, user=Depends(require_user)):
     report = await request.json()
     status = report.get("status")
     sjt = sanitize_job_type(report.get("job_type", DEFAULT_JOB_TYPE))
+    worker_id = report.get("worker_id")
+    client_ip = get_client_ip(request)
     
     active_path = os.path.join(ACTIVE_DIR, sjt, f"{job_id}.json")
     if not os.path.exists(active_path):
@@ -91,10 +140,25 @@ async def report_job(job_id: str, request: Request, user=Depends(require_user)):
     async with aiofiles.open(active_path, "r") as f:
         job_data = json.loads(await f.read())
         
+    # Verify this worker owns the job (optional but recommended)
+    assigned_worker = job_data.get("assigned_worker")
+    if assigned_worker and worker_id and assigned_worker != worker_id:
+        print(f"Warning: Job {job_id} assigned to {assigned_worker} but reported by {worker_id}")
+        # Still accept the report but log the discrepancy
+    
+    # Update worker registry - remove job from active list
+    if worker_id:
+        update_worker_registry(worker_id, ip=client_ip, job_id=job_id, remove_job=True)
+    
     job_data.update(report)
     job_data["updated_at"] = datetime.now().isoformat()
     
-    target_dir = COMPLETED_DIR if status == "completed" else FAILED_DIR
+    if status == "completed":
+        target_dir = COMPLETED_DIR
+    elif status == "paused":
+        target_dir = os.path.join(JOB_DIR, "paused")
+    else:
+        target_dir = FAILED_DIR
     os.makedirs(os.path.join(target_dir, sjt), exist_ok=True)
     final_path = os.path.join(target_dir, sjt, f"{job_id}.json")
     

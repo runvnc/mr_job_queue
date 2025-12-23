@@ -19,26 +19,137 @@ from lib.chatcontext import get_context
 # Local imports
 from .filelock import FileLock
 from .helpers import get_job_data, sanitize_job_type
+import nanoid
 
 debug_box("----------------------------------- JOB_QUEUE STARTING ----------------------------------------------------")
 
 # Configuration handling
 CONFIG_PATH = "data/jobs/config.json"
 def load_config():
+    """Load configuration from file, with defaults."""
     if os.path.exists(CONFIG_PATH):
         with open(CONFIG_PATH, 'r') as f:
-            return json.load(f)
-    return {
+            config = json.load(f)
+    else:
+        config = {}
+    
+    # Apply defaults
+    defaults = {
         "mode": "standalone",
         "master_url": "",
-        "max_concurrent": 5,
-        "max_concurrent_per_type": 1
+        "api_key": "",
+        "stale_job_timeout_minutes": 60,
+        "limits": {
+            "default": {
+                "max_global": 5,
+                "max_per_instance": 1
+            }
+        }
+    }
+    
+    for key, value in defaults.items():
+        if key not in config:
+            config[key] = value
+    
+    # Ensure default limits exist
+    if "default" not in config.get("limits", {}):
+        config.setdefault("limits", {})["default"] = defaults["limits"]["default"]
+    
+    return config
+
+def get_limits_for_type(job_type, config=None):
+    """Get the limits for a specific job type, falling back to default."""
+    if config is None:
+        config = load_config()
+    limits = config.get("limits", {})
+    type_limits = limits.get(job_type, limits.get("default", {}))
+    return {
+        "max_global": type_limits.get("max_global", 5),
+        "max_per_instance": type_limits.get("max_per_instance", 1)
     }
 
 def save_config(config):
     os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
     with open(CONFIG_PATH, 'w') as f:
         json.dump(config, f, indent=2)
+
+# ---------------------------------------------------------------------------
+# Worker Identity
+# ---------------------------------------------------------------------------
+WORKER_ID_PATH = "data/jobs/worker_id"
+WORKERS_REGISTRY_PATH = "data/jobs/workers.json"
+_worker_id = None
+
+def get_worker_id():
+    """Get or generate this instance's unique worker ID."""
+    global _worker_id
+    if _worker_id:
+        return _worker_id
+    
+    if os.path.exists(WORKER_ID_PATH):
+        with open(WORKER_ID_PATH, 'r') as f:
+            _worker_id = f.read().strip()
+    else:
+        _worker_id = f"w_{nanoid.generate(size=12)}"
+        os.makedirs(os.path.dirname(WORKER_ID_PATH), exist_ok=True)
+        with open(WORKER_ID_PATH, 'w') as f:
+            f.write(_worker_id)
+    
+    return _worker_id
+
+def load_workers_registry():
+    """Load the workers registry from file."""
+    if os.path.exists(WORKERS_REGISTRY_PATH):
+        try:
+            with open(WORKERS_REGISTRY_PATH, 'r') as f:
+                return json.load(f)
+        except:
+            return {}
+    return {}
+
+def save_workers_registry(registry):
+    """Save the workers registry to file."""
+    os.makedirs(os.path.dirname(WORKERS_REGISTRY_PATH), exist_ok=True)
+    with open(WORKERS_REGISTRY_PATH, 'w') as f:
+        json.dump(registry, f, indent=2)
+
+def update_worker_registry(worker_id, ip=None, job_id=None, remove_job=False):
+    """Update worker info in the registry."""
+    registry = load_workers_registry()
+    
+    if worker_id not in registry:
+        registry[worker_id] = {
+            "ip": ip,
+            "first_seen": datetime.now().isoformat(),
+            "last_seen": datetime.now().isoformat(),
+            "active_jobs": []
+        }
+    
+    registry[worker_id]["last_seen"] = datetime.now().isoformat()
+    if ip:
+        registry[worker_id]["ip"] = ip
+    
+    if job_id:
+        if remove_job:
+            if job_id in registry[worker_id]["active_jobs"]:
+                registry[worker_id]["active_jobs"].remove(job_id)
+        else:
+            if job_id not in registry[worker_id]["active_jobs"]:
+                registry[worker_id]["active_jobs"].append(job_id)
+    
+    save_workers_registry(registry)
+    return registry[worker_id]
+
+def count_active_jobs_for_type(job_type):
+    """Count how many jobs of a type are currently active."""
+    active_type_dir = os.path.join(ACTIVE_DIR, job_type)
+    if not os.path.exists(active_type_dir):
+        return 0
+    try:
+        files = os.listdir(active_type_dir)
+        return len([f for f in files if f.endswith('.json')])
+    except Exception:
+        return 0
 
 # Job directory structure
 JOB_DIR = "data/jobs"  # Base directory for all jobs
@@ -48,22 +159,6 @@ COMPLETED_DIR = f"{JOB_DIR}/completed"  # Will contain job_type subdirectories
 DEFAULT_JOB_TYPE = "default"  # Default job type for backward compatibility
 FAILED_DIR = f"{JOB_DIR}/failed"
 PAUSED_DIR = f"{JOB_DIR}/paused"
-# Note: JOB_INDEX removed - we now scan directories directly
-
-# Concurrency settings - Read from environment variable
-try:
-    MAX_CONCURRENT_JOBS = int(os.getenv('JOB_QUEUE_MAX_CONCURRENT', '5'))
-except ValueError:
-    print("Warning: Invalid value for JOB_QUEUE_MAX_CONCURRENT env var, defaulting to 5.")
-    MAX_CONCURRENT_JOBS = 5
-
-
-# Concurrency settings per job type - Read from environment variable
-try:
-    MAX_CONCURRENT_PER_TYPE = int(os.getenv('JOB_QUEUE_MAX_CONCURRENT_PER_TYPE', '1'))
-except ValueError:
-    print("Warning: Invalid value for JOB_QUEUE_MAX_CONCURRENT_PER_TYPE env var, defaulting to 1.")
-    MAX_CONCURRENT_PER_TYPE = 1
 
 # Ensure directories exist
 os.makedirs(QUEUED_DIR, exist_ok=True)
@@ -71,6 +166,7 @@ os.makedirs(ACTIVE_DIR, exist_ok=True)
 os.makedirs(COMPLETED_DIR, exist_ok=True)
 os.makedirs(FAILED_DIR, exist_ok=True)
 os.makedirs(PAUSED_DIR, exist_ok=True)
+
 # Worker process state
 worker_task = None
 worker_running = asyncio.Event() # Use Event for clearer start/stop signaling
@@ -83,6 +179,8 @@ job_type_tasks = {}
 # Completion notification for jobs being waited on
 job_completion_events = {}   # job_id -> asyncio.Event
 job_completion_results = {}  # job_id -> result data
+# Stale job cleanup task
+stale_cleanup_task = None
 
 
 # ---------------------------------------------------------------------------
@@ -266,8 +364,6 @@ async def process_job(job_id, job_data, job_type=None):
         print(f"Error in process_job for {job_id}: {e}")
         return False
 
-        return False
-
 # ---------------------------------------------------------------------------
 # wait_for_job service - waits for a job to complete and returns result
 # ---------------------------------------------------------------------------
@@ -340,8 +436,10 @@ async def run_job_and_release(job_id, job_data, sem, job_type=None):
 
 async def job_type_worker_loop(job_type):
     """Worker loop for a specific job type."""
-    if job_type not in job_type_semaphores:
-        job_type_semaphores[job_type] = asyncio.Semaphore(MAX_CONCURRENT_PER_TYPE)
+    config = load_config()
+    limits = get_limits_for_type(job_type, config)
+    if job_type not in job_type_semaphores or job_type_semaphores[job_type]._value != limits["max_per_instance"]:
+        job_type_semaphores[job_type] = asyncio.Semaphore(limits["max_per_instance"])
     sem = job_type_semaphores[job_type]
     
     config = load_config()
@@ -349,7 +447,10 @@ async def job_type_worker_loop(job_type):
         await worker_remote_loop(job_type, sem, config)
         return
 
-    await worker_local_loop(job_type, sem)
+    # Master and standalone modes both process local queue
+    # Master mode also respects global limits when leasing to remote workers
+    # but processes its own jobs through the same local loop
+    await worker_local_loop(job_type, sem, config)
 
 async def worker_remote_loop(job_type, sem, config):
     """Worker loop that polls a remote master."""
@@ -360,6 +461,8 @@ async def worker_remote_loop(job_type, sem, config):
 
     print(f"Remote worker loop started for {job_type} -> {master_url}")
     
+    my_worker_id = get_worker_id()
+    
     headers = {}
     if config.get("api_key"):
         headers["Authorization"] = f"Bearer {config['api_key']}"
@@ -369,7 +472,10 @@ async def worker_remote_loop(job_type, sem, config):
             try:
                 await sem.acquire()
                 # Lease a job from master
-                resp = await client.post(f"{master_url}/api/jobs/lease", json={"job_type": job_type})
+                resp = await client.post(f"{master_url}/api/jobs/lease", json={
+                    "job_type": job_type,
+                    "worker_id": my_worker_id
+                })
                 
                 if resp.status_code == 204: # Empty
                     sem.release()
@@ -380,7 +486,7 @@ async def worker_remote_loop(job_type, sem, config):
                 job_id = job_data["id"]
                 
                 # Process and report
-                task = asyncio.create_task(run_remote_job_and_report(job_id, job_data, sem, job_type, client, master_url))
+                task = asyncio.create_task(run_remote_job_and_report(job_id, job_data, sem, job_type, client, master_url, my_worker_id))
                 active_job_tasks.add(task)
                 task.add_done_callback(active_job_tasks.discard)
 
@@ -388,12 +494,14 @@ async def worker_remote_loop(job_type, sem, config):
                 print(f"Remote worker error: {e}")
                 await asyncio.sleep(10)
 
-async def worker_local_loop(job_type, sem):
-    """Original local filesystem scanning loop."""
-    
-    print(f"Job queue worker for type '{job_type}' started (limit: {MAX_CONCURRENT_PER_TYPE})")
+async def worker_local_loop(job_type, sem, config):
+    """Local filesystem scanning loop for standalone and master modes."""
+    limits = get_limits_for_type(job_type, config)
+    mode = config.get("mode", "standalone")
+    print(f"Job queue worker for type '{job_type}' started (mode: {mode}, max_per_instance: {limits['max_per_instance']}, max_global: {limits['max_global']})")
     queued_job_type_dir = f"{QUEUED_DIR}/{job_type}"
     active_job_type_dir = f"{ACTIVE_DIR}/{job_type}"
+    is_master = mode == "master"
     
     while worker_running.is_set():
         try:
@@ -416,6 +524,16 @@ async def worker_local_loop(job_type, sem):
                 print(f"Attempting to acquire semaphore for job {job_id}...")
                 await sem.acquire()
                 print(f"Semaphore acquired for job {job_id}")
+                
+                # In master mode, also check global limit before processing
+                if is_master:
+                    active_count = count_active_jobs_for_type(job_type)
+                    if active_count >= limits["max_global"]:
+                        print(f"Global limit reached for {job_type} ({active_count}/{limits['max_global']}), waiting...")
+                        sem.release()
+                        await asyncio.sleep(5)
+                        break  # Re-check queue from start
+                
 
                 if not await aiofiles.os.path.exists(job_path):
                     sem.release()
@@ -443,12 +561,17 @@ async def worker_local_loop(job_type, sem):
         except Exception as e:
             print(f"Worker loop for '{job_type}' encountered an error: {e}")
             await asyncio.sleep(10)
+    
+    print(f"Job queue worker loop for type '{job_type}' finished.")
 
-async def run_remote_job_and_report(job_id, job_data, sem, job_type, client, master_url):
+async def run_remote_job_and_report(job_id, job_data, sem, job_type, client, master_url, worker_id):
     """Run job locally and report result back to master."""
     try:
         print(f"Executing remote job {job_id}...")
         job_data = await execute_job_core(job_id, job_data)
+        
+        # Add worker_id to the report
+        job_data["worker_id"] = worker_id
         
         print(f"Reporting remote job {job_id} back to master...")
         resp = await client.post(f"{master_url}/api/jobs/report/{job_id}", json=job_data)
@@ -458,8 +581,94 @@ async def run_remote_job_and_report(job_id, job_data, sem, job_type, client, mas
         print(f"Error in run_remote_job_and_report: {e}")
     finally:
         sem.release()
+
+# ---------------------------------------------------------------------------
+# Stale job cleanup
+# ---------------------------------------------------------------------------
+async def cleanup_stale_jobs():
+    """Periodically check for stale jobs and move them back to queued. Uses worker registry to detect dead workers."""
+    config = load_config()
+    timeout_minutes = config.get("stale_job_timeout_minutes", 60)
     
-    print(f"Job queue worker loop for type '{job_type}' finished.")
+    while worker_running.is_set():
+        try:
+            await asyncio.sleep(300)  # Check every 5 minutes
+            
+            config = load_config()  # Reload in case it changed
+            timeout_minutes = config.get("stale_job_timeout_minutes", 60)
+            
+            if timeout_minutes <= 0:
+                continue  # Disabled
+            
+            now = datetime.now()
+            registry = load_workers_registry()
+            # Consider a worker dead if not seen in 10 minutes
+            worker_timeout_seconds = 600
+            
+            # Scan active directory for stale jobs
+            if not os.path.exists(ACTIVE_DIR):
+                continue
+                
+            for job_type_dir in os.listdir(ACTIVE_DIR):
+                type_path = os.path.join(ACTIVE_DIR, job_type_dir)
+                if not os.path.isdir(type_path):
+                    continue
+                    
+                for job_file in os.listdir(type_path):
+                    if not job_file.endswith('.json'):
+                        continue
+                    
+                    job_path = os.path.join(type_path, job_file)
+                    try:
+                        async with aiofiles.open(job_path, 'r') as f:
+                            job_data = json.loads(await f.read())
+                        
+                        # Check if assigned worker is still alive
+                        assigned_worker = job_data.get("assigned_worker")
+                        worker_is_dead = False
+                        
+                        if assigned_worker and assigned_worker in registry:
+                            worker_info = registry[assigned_worker]
+                            last_seen = worker_info.get("last_seen")
+                            if last_seen:
+                                last_seen_dt = datetime.fromisoformat(last_seen)
+                                if (now - last_seen_dt).total_seconds() > worker_timeout_seconds:
+                                    worker_is_dead = True
+                                    print(f"Worker {assigned_worker} appears dead (last seen: {last_seen})")
+                        elif assigned_worker:
+                            # Worker not in registry at all - probably dead
+                            worker_is_dead = True
+                            print(f"Worker {assigned_worker} not in registry")
+                        
+                        # Check time-based staleness as fallback
+                        time_is_stale = False
+                        started_at = job_data.get("started_at") or job_data.get("assigned_at")
+                        if started_at:
+                            started = datetime.fromisoformat(started_at)
+                            if (now - started).total_seconds() > timeout_minutes * 60:
+                                time_is_stale = True
+                        
+                        # Requeue if worker is dead OR job is time-stale
+                        if worker_is_dead or time_is_stale:
+                            reason = "worker dead" if worker_is_dead else "time stale"
+                            print(f"Stale job detected: {job_file} (reason: {reason}, started: {started_at})")
+                            # Clear worker assignment before requeuing
+                            job_data.pop("assigned_worker", None)
+                            job_data.pop("assigned_worker_ip", None)
+                            job_data.pop("assigned_at", None)
+                            job_data["status"] = "queued"
+                            job_data["updated_at"] = datetime.now().isoformat()
+                            queued_path = os.path.join(QUEUED_DIR, job_type_dir, job_file)
+                            os.makedirs(os.path.dirname(queued_path), exist_ok=True)
+                            # Write updated job data
+                            async with aiofiles.open(queued_path, 'w') as f:
+                                await f.write(json.dumps(job_data, indent=2))
+                            os.remove(job_path)
+                            print(f"Moved stale job {job_file} back to queued")
+                    except Exception as e:
+                        print(f"Error checking stale job {job_file}: {e}")
+        except Exception as e:
+            print(f"Error in stale job cleanup: {e}")
 
 # ---------------------------------------------------------------------------
 # Worker lifecycle management
@@ -495,9 +704,12 @@ async def start_job_type_workers():
 @hook()
 async def startup(app, context=None):
     """Start the worker system when the plugin loads."""
+    global stale_cleanup_task
     print("Plugin startup: Initializing job queue worker system.")
     worker_running.set()
     asyncio.create_task(start_job_type_workers())
+    # Start stale job cleanup task
+    stale_cleanup_task = asyncio.create_task(cleanup_stale_jobs())
     return {"status": "Worker system initialized"}
 
 @hook()
@@ -505,6 +717,14 @@ async def quit(context=None):
     """Stop the worker and cleanup active tasks when the plugin stops."""
     print("Plugin quit: Stopping job queue worker.")
     worker_running.clear()
+    
+    # Cancel stale cleanup task
+    if stale_cleanup_task:
+        stale_cleanup_task.cancel()
+        try:
+            await stale_cleanup_task
+        except asyncio.CancelledError:
+            pass
     
     all_tasks = list(job_type_tasks.values()) + list(active_job_tasks)
     if all_tasks:
