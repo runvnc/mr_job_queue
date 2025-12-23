@@ -1,5 +1,7 @@
 from fastapi import APIRouter, Request, Depends, HTTPException, File, UploadFile, Form, Header
 from datetime import datetime
+import asyncio
+import time
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 import io
 from lib.templates import render
@@ -65,9 +67,15 @@ async def lease_job(request: Request, user=Depends(require_user)):
     requested_type = data.get("job_type")
     worker_id = data.get("worker_id")
     client_ip = get_client_ip(request)
+    # Long polling timeout - default 15s, max 55s
+    requested_timeout = data.get("timeout", 15)
+    timeout = min(max(requested_timeout, 1), 55)
     
     if not worker_id:
         return JSONResponse({"error": "worker_id required"}, status_code=400)
+    
+    # Update worker registry to show it's alive (even if no job available)
+    update_worker_registry(worker_id, ip=client_ip)
     
     # Find a job to lease
     target_types = [sanitize_job_type(requested_type)] if requested_type else []
@@ -75,52 +83,62 @@ async def lease_job(request: Request, user=Depends(require_user)):
         if os.path.exists(QUEUED_DIR):
             target_types = [d for d in os.listdir(QUEUED_DIR) if os.path.isdir(os.path.join(QUEUED_DIR, d))]
 
-    for sjt in target_types:
-        qdir = os.path.join(QUEUED_DIR, sjt)
-        if not os.path.exists(qdir): continue
-        
-        # Check global limit for this job type
-        limits = get_limits_for_type(sjt, config)
-        active_count = count_active_jobs_for_type(sjt)
-        if active_count >= limits["max_global"]:
-            # Global limit reached for this type, try next type or return empty
-            continue
-        
-        
-        files = sorted(os.listdir(qdir))
-        for f in files:
-            if not f.endswith(".json"): continue
+    start_time = time.time()
+    poll_interval = 2  # Check every 2 seconds
+    
+    while time.time() - start_time < timeout:
+        for sjt in target_types:
+            qdir = os.path.join(QUEUED_DIR, sjt)
+            if not os.path.exists(qdir): continue
             
-            job_id = f.replace(".json", "")
-            old_path = os.path.join(qdir, f)
-            new_dir = os.path.join(ACTIVE_DIR, sjt)
-            os.makedirs(new_dir, exist_ok=True)
-            new_path = os.path.join(new_dir, f)
+            # Check global limit for this job type
+            limits = get_limits_for_type(sjt, config)
+            active_count = count_active_jobs_for_type(sjt)
+            if active_count >= limits["max_global"]:
+                # Global limit reached for this type, try next type
+                continue
             
             try:
-                # Atomic move to claim the job
-                os.rename(old_path, new_path)
-                
-                # Read job data and add worker tracking info
-                async with aiofiles.open(new_path, "r") as jf:
-                    job_data = json.loads(await jf.read())
-                
-                job_data["assigned_worker"] = worker_id
-                job_data["assigned_worker_ip"] = client_ip
-                job_data["assigned_at"] = datetime.now().isoformat()
-                
-                async with aiofiles.open(new_path, "w") as jf:
-                    await jf.write(json.dumps(job_data, indent=2))
-                
-                # Update worker registry
-                update_worker_registry(worker_id, ip=client_ip, job_id=job_id)
-                
-                return JSONResponse(job_data)
-            except FileNotFoundError:
-                continue # Someone else got it
-            except Exception as e:
-                print(f"Lease error: {e}")
+                files = sorted(os.listdir(qdir))
+            except OSError:
                 continue
+                
+            for f in files:
+                if not f.endswith(".json"): continue
+                
+                job_id = f.replace(".json", "")
+                old_path = os.path.join(qdir, f)
+                new_dir = os.path.join(ACTIVE_DIR, sjt)
+                os.makedirs(new_dir, exist_ok=True)
+                new_path = os.path.join(new_dir, f)
+                
+                try:
+                    # Atomic move to claim the job
+                    os.rename(old_path, new_path)
+                    
+                    # Read job data and add worker tracking info
+                    async with aiofiles.open(new_path, "r") as jf:
+                        job_data = json.loads(await jf.read())
+                    
+                    job_data["assigned_worker"] = worker_id
+                    job_data["assigned_worker_ip"] = client_ip
+                    job_data["assigned_at"] = datetime.now().isoformat()
+                    
+                    async with aiofiles.open(new_path, "w") as jf:
+                        await jf.write(json.dumps(job_data, indent=2))
+                    
+                    # Update worker registry
+                    update_worker_registry(worker_id, ip=client_ip, job_id=job_id)
+                    
+                    return JSONResponse(job_data)
+                except FileNotFoundError:
+                    continue # Someone else got it
+                except Exception as e:
+                    print(f"Lease error: {e}")
+                    continue
+        
+        # No job found this iteration, wait before checking again
+        await asyncio.sleep(poll_interval)
                 
     return JSONResponse({"status": "empty"}, status_code=204)
 

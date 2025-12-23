@@ -462,26 +462,36 @@ async def worker_remote_loop(job_type, sem, config):
     print(f"Remote worker loop started for {job_type} -> {master_url}")
     
     my_worker_id = get_worker_id()
+    poll_timeout = 15  # Long poll timeout in seconds
     
     headers = {}
     if config.get("api_key"):
         headers["Authorization"] = f"Bearer {config['api_key']}"
 
-    async with httpx.AsyncClient(timeout=60.0, headers=headers) as client:
+    # HTTP timeout must be longer than poll timeout
+    http_timeout = poll_timeout + 10
+    
+    async with httpx.AsyncClient(timeout=http_timeout, headers=headers) as client:
         while worker_running.is_set():
             try:
                 await sem.acquire()
-                # Lease a job from master
+                # Long poll for a job from master
                 resp = await client.post(f"{master_url}/api/jobs/lease", json={
                     "job_type": job_type,
-                    "worker_id": my_worker_id
+                    "worker_id": my_worker_id,
+                    "timeout": poll_timeout
                 })
                 
-                if resp.status_code == 204: # Empty
+                if resp.status_code == 204:  # No jobs available after timeout
                     sem.release()
-                    await asyncio.sleep(10)
-                    continue
+                    continue  # Immediately retry long poll
                 
+                if resp.status_code == 400:
+                    print(f"Lease error: {resp.text}")
+                    sem.release()
+                    await asyncio.sleep(5)
+                    continue
+                    
                 job_data = resp.json()
                 job_id = job_data["id"]
                 
@@ -490,8 +500,14 @@ async def worker_remote_loop(job_type, sem, config):
                 active_job_tasks.add(task)
                 task.add_done_callback(active_job_tasks.discard)
 
+            except httpx.TimeoutException:
+                # Server didn't respond in time - just retry
+                print(f"Long poll timeout for {job_type}, retrying...")
+                sem.release()
+                continue
             except Exception as e:
                 print(f"Remote worker error: {e}")
+                sem.release()
                 await asyncio.sleep(10)
 
 async def worker_local_loop(job_type, sem, config):
