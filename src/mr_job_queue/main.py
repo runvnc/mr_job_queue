@@ -1,5 +1,6 @@
 import json
 import os
+import sys
 import uuid
 import time
 from datetime import datetime
@@ -475,12 +476,15 @@ async def job_type_worker_loop(job_type):
     
     config = load_config()
     mode = config.get("mode", "standalone")
-    print(f"[DEBUG] job_type_worker_loop for '{job_type}': mode={mode}")
-    
+    print(f"[DEBUG] job_type_worker_loop for '{job_type}': mode={mode}", flush=True)
+    print(f"[DEBUG] Full config: {json.dumps(config, indent=2)}", flush=True)
+
     if config.get("mode") == "worker":
+        print(f"[DEBUG] Entering worker_remote_loop for {job_type}", flush=True)
         await worker_remote_loop(job_type, sem, config)
         return
 
+    print(f"[DEBUG] Entering worker_local_loop for {job_type}", flush=True)
     # Master and standalone modes both process local queue
     # Master mode also respects global limits when leasing to remote workers
     # but processes its own jobs through the same local loop
@@ -496,10 +500,10 @@ async def worker_remote_loop(job_type, sem, config):
     my_worker_id = get_worker_id()
     poll_timeout = 15  # Long poll timeout in seconds
     
-    print(f"[WORKER DEBUG] Starting remote worker loop for job_type='{job_type}'")
-    print(f"[WORKER DEBUG] Master URL: {master_url}")
-    print(f"[WORKER DEBUG] Worker ID: {my_worker_id}")
-    print(f"[WORKER DEBUG] Poll timeout: {poll_timeout}s")
+    print(f"[WORKER DEBUG] Starting remote worker loop for job_type='{job_type}'", flush=True)
+    print(f"[WORKER DEBUG] Master URL: {master_url}", flush=True)
+    print(f"[WORKER DEBUG] Worker ID: {my_worker_id}", flush=True)
+    print(f"[WORKER DEBUG] Poll timeout: {poll_timeout}s", flush=True)
     
     headers = {}
     if config.get("api_key"):
@@ -509,11 +513,12 @@ async def worker_remote_loop(job_type, sem, config):
     http_timeout = poll_timeout + 10
     
     async with httpx.AsyncClient(timeout=http_timeout, headers=headers) as client:
+        print(f"[WORKER DEBUG] HTTP client created, entering poll loop", flush=True)
         while worker_running.is_set():
             try:
-                print(f"[WORKER DEBUG] Acquiring semaphore for {job_type}...")
+                print(f"[WORKER DEBUG] Acquiring semaphore for {job_type}...", flush=True)
                 await sem.acquire()
-                print(f"[WORKER DEBUG] Semaphore acquired, sending lease request to {master_url}/api/jobs/lease")
+                print(f"[WORKER DEBUG] Semaphore acquired, sending lease request to {master_url}/api/jobs/lease", flush=True)
                 
                 # Long poll for a job from master
                 resp = await client.post(f"{master_url}/api/jobs/lease", json={
@@ -522,28 +527,28 @@ async def worker_remote_loop(job_type, sem, config):
                     "timeout": poll_timeout
                 })
                 
-                print(f"[WORKER DEBUG] Lease response: status={resp.status_code}")
+                print(f"[WORKER DEBUG] Lease response: status={resp.status_code}", flush=True)
                 
                 if resp.status_code == 204:  # No jobs available after timeout
-                    print(f"[WORKER DEBUG] No jobs available (204), retrying...")
+                    print(f"[WORKER DEBUG] No jobs available (204), retrying...", flush=True)
                     sem.release()
                     continue  # Immediately retry long poll
                 
                 if resp.status_code == 400:
-                    print(f"[WORKER DEBUG] Lease error (400): {resp.text}")
+                    print(f"[WORKER DEBUG] Lease error (400): {resp.text}", flush=True)
                     sem.release()
                     await asyncio.sleep(5)
                     continue
                 
                 if resp.status_code != 200:
-                    print(f"[WORKER DEBUG] Unexpected status {resp.status_code}: {resp.text}")
+                    print(f"[WORKER DEBUG] Unexpected status {resp.status_code}: {resp.text}", flush=True)
                     sem.release()
                     await asyncio.sleep(5)
                     continue
                 
                 job_data = resp.json()
                 job_id = job_data["id"]
-                print(f"[WORKER DEBUG] Got job {job_id}, starting processing...")
+                print(f"[WORKER DEBUG] Got job {job_id}, starting processing...", flush=True)
                 
                 # Process and report
                 task = asyncio.create_task(run_remote_job_and_report(job_id, job_data, sem, job_type, client, master_url, my_worker_id))
@@ -552,13 +557,13 @@ async def worker_remote_loop(job_type, sem, config):
 
             except httpx.TimeoutException:
                 # Server didn't respond in time - just retry
-                print(f"[WORKER DEBUG] HTTP timeout for {job_type}, retrying...")
+                print(f"[WORKER DEBUG] HTTP timeout for {job_type}, retrying...", flush=True)
                 sem.release()
                 continue
             except Exception as e:
-                print(f"[WORKER DEBUG] Remote worker error: {e}")
+                print(f"[WORKER DEBUG] Remote worker error: {e}", flush=True)
                 import traceback
-                traceback.print_exc()
+                traceback.print_exc(file=sys.stderr)
                 sem.release()
                 await asyncio.sleep(10)
 
@@ -750,35 +755,46 @@ async def cleanup_stale_jobs():
 async def ensure_job_type_worker_running(job_type):
     """Ensure a worker for a specific job type is running."""
     if not worker_running.is_set():
+        print(f"[DEBUG] ensure_job_type_worker_running: worker_running not set, skipping {job_type}", flush=True)
         return
         
     sjt = sanitize_job_type(job_type)
     if sjt in job_type_tasks and not job_type_tasks[sjt].done():
+        print(f"[DEBUG] ensure_job_type_worker_running: worker already running for {sjt}", flush=True)
         return
     
-    print(f"Starting on-demand worker for job type: {sjt}")
+    print(f"[DEBUG] Starting on-demand worker for job type: {sjt}", flush=True)
     job_type_tasks[sjt] = asyncio.create_task(job_type_worker_loop(sjt))
 
 async def start_job_type_workers():
     """Start workers for job types with pending jobs at startup."""
+    print(f"[DEBUG] start_job_type_workers called", flush=True)
     if not await aiofiles.os.path.exists(QUEUED_DIR):
+        print(f"[DEBUG] QUEUED_DIR {QUEUED_DIR} does not exist", flush=True)
         return
 
+    dirs = await aiofiles.os.listdir(QUEUED_DIR)
+    print(f"[DEBUG] Found job type dirs in queue: {dirs}", flush=True)
+    
     for job_type_dir in await aiofiles.os.listdir(QUEUED_DIR):
         job_type_path = os.path.join(QUEUED_DIR, job_type_dir)
         if await aiofiles.os.path.isdir(job_type_path):
             try:
                 files = await aiofiles.os.listdir(job_type_path)
+                json_files = [f for f in files if f.endswith('.json')]
+                print(f"[DEBUG] Job type {job_type_dir}: {len(json_files)} queued jobs", flush=True)
                 if any(f.endswith('.json') for f in files):
                     await ensure_job_type_worker_running(job_type_dir)
             except Exception as e:
-                print(f"Error checking job type dir {job_type_dir}: {e}")
+                print(f"[DEBUG] Error checking job type dir {job_type_dir}: {e}", flush=True)
 
 @hook()
 async def startup(app, context=None):
     """Start the worker system when the plugin loads."""
     global stale_cleanup_task
-    print("Plugin startup: Initializing job queue worker system.")
+    config = load_config()
+    print(f"[DEBUG] Plugin startup: mode={config.get('mode')}", flush=True)
+    print(f"[DEBUG] Plugin startup: Initializing job queue worker system.", flush=True)
     worker_running.set()
     asyncio.create_task(start_job_type_workers())
     # Start stale job cleanup task
