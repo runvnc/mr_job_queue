@@ -455,6 +455,9 @@ async def job_type_worker_loop(job_type):
     sem = job_type_semaphores[job_type]
     
     config = load_config()
+    mode = config.get("mode", "standalone")
+    print(f"[DEBUG] job_type_worker_loop for '{job_type}': mode={mode}")
+    
     if config.get("mode") == "worker":
         await worker_remote_loop(job_type, sem, config)
         return
@@ -471,10 +474,13 @@ async def worker_remote_loop(job_type, sem, config):
         print(f"Worker mode active but no master_url configured for {job_type}")
         return
 
-    print(f"Remote worker loop started for {job_type} -> {master_url}")
-    
     my_worker_id = get_worker_id()
     poll_timeout = 15  # Long poll timeout in seconds
+    
+    print(f"[WORKER DEBUG] Starting remote worker loop for job_type='{job_type}'")
+    print(f"[WORKER DEBUG] Master URL: {master_url}")
+    print(f"[WORKER DEBUG] Worker ID: {my_worker_id}")
+    print(f"[WORKER DEBUG] Poll timeout: {poll_timeout}s")
     
     headers = {}
     if config.get("api_key"):
@@ -486,7 +492,10 @@ async def worker_remote_loop(job_type, sem, config):
     async with httpx.AsyncClient(timeout=http_timeout, headers=headers) as client:
         while worker_running.is_set():
             try:
+                print(f"[WORKER DEBUG] Acquiring semaphore for {job_type}...")
                 await sem.acquire()
+                print(f"[WORKER DEBUG] Semaphore acquired, sending lease request to {master_url}/api/jobs/lease")
+                
                 # Long poll for a job from master
                 resp = await client.post(f"{master_url}/api/jobs/lease", json={
                     "job_type": job_type,
@@ -494,18 +503,28 @@ async def worker_remote_loop(job_type, sem, config):
                     "timeout": poll_timeout
                 })
                 
+                print(f"[WORKER DEBUG] Lease response: status={resp.status_code}")
+                
                 if resp.status_code == 204:  # No jobs available after timeout
+                    print(f"[WORKER DEBUG] No jobs available (204), retrying...")
                     sem.release()
                     continue  # Immediately retry long poll
                 
                 if resp.status_code == 400:
-                    print(f"Lease error: {resp.text}")
+                    print(f"[WORKER DEBUG] Lease error (400): {resp.text}")
                     sem.release()
                     await asyncio.sleep(5)
                     continue
-                    
+                
+                if resp.status_code != 200:
+                    print(f"[WORKER DEBUG] Unexpected status {resp.status_code}: {resp.text}")
+                    sem.release()
+                    await asyncio.sleep(5)
+                    continue
+                
                 job_data = resp.json()
                 job_id = job_data["id"]
+                print(f"[WORKER DEBUG] Got job {job_id}, starting processing...")
                 
                 # Process and report
                 task = asyncio.create_task(run_remote_job_and_report(job_id, job_data, sem, job_type, client, master_url, my_worker_id))
@@ -514,11 +533,13 @@ async def worker_remote_loop(job_type, sem, config):
 
             except httpx.TimeoutException:
                 # Server didn't respond in time - just retry
-                print(f"Long poll timeout for {job_type}, retrying...")
+                print(f"[WORKER DEBUG] HTTP timeout for {job_type}, retrying...")
                 sem.release()
                 continue
             except Exception as e:
-                print(f"Remote worker error: {e}")
+                print(f"[WORKER DEBUG] Remote worker error: {e}")
+                import traceback
+                traceback.print_exc()
                 sem.release()
                 await asyncio.sleep(10)
 

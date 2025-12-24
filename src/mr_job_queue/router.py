@@ -85,11 +85,14 @@ async def lease_job(request: Request, user=Depends(require_user)):
     requested_timeout = data.get("timeout", 15)
     timeout = min(max(requested_timeout, 1), 55)
     
+    print(f"[MASTER DEBUG] Lease request from worker_id={worker_id}, ip={client_ip}, job_type={requested_type}, timeout={timeout}")
+    
     if not worker_id:
         return JSONResponse({"error": "worker_id required"}, status_code=400)
     
     # Check if queue is paused
     if is_queue_paused():
+        print(f"[MASTER DEBUG] Queue is paused, returning 204")
         return JSONResponse({"status": "paused"}, status_code=204)
     
     # Update worker registry to show it's alive (even if no job available)
@@ -100,6 +103,8 @@ async def lease_job(request: Request, user=Depends(require_user)):
     if not target_types:
         if os.path.exists(QUEUED_DIR):
             target_types = [d for d in os.listdir(QUEUED_DIR) if os.path.isdir(os.path.join(QUEUED_DIR, d))]
+    
+    print(f"[MASTER DEBUG] Checking job types: {target_types}")
 
     start_time = time.time()
     poll_interval = 2  # Check every 2 seconds
@@ -113,6 +118,7 @@ async def lease_job(request: Request, user=Depends(require_user)):
             limits = get_limits_for_type(sjt, config)
             active_count = count_active_jobs_for_type(sjt)
             if active_count >= limits["max_global"]:
+                print(f"[MASTER DEBUG] Global limit reached for {sjt}: {active_count}/{limits['max_global']}")
                 # Global limit reached for this type, try next type
                 continue
             
@@ -142,6 +148,7 @@ async def lease_job(request: Request, user=Depends(require_user)):
                     job_data["assigned_worker_ip"] = client_ip
                     job_data["assigned_at"] = datetime.now().isoformat()
                     
+                    print(f"[MASTER DEBUG] Leasing job {job_id} to worker {worker_id}")
                     async with aiofiles.open(new_path, "w") as jf:
                         await jf.write(json.dumps(job_data, indent=2))
                     
@@ -158,6 +165,7 @@ async def lease_job(request: Request, user=Depends(require_user)):
         # No job found this iteration, wait before checking again
         await asyncio.sleep(poll_interval)
                 
+    print(f"[MASTER DEBUG] No jobs found after {timeout}s, returning 204")
     return JSONResponse({"status": "empty"}, status_code=204)
 
 @router.post("/api/jobs/report/{job_id}")
