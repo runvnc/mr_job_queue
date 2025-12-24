@@ -529,7 +529,17 @@ async def worker_remote_loop(job_type, sem, config):
                 
                 print(f"[WORKER DEBUG] Lease response: status={resp.status_code}", flush=True)
                 
-                if resp.status_code == 204:  # No jobs available after timeout
+                if resp.status_code == 204:  # No jobs available or paused
+                    # Check if paused (response body will indicate)
+                    try:
+                        body = resp.json()
+                        if body.get("status") == "paused":
+                            print(f"[WORKER DEBUG] Queue is paused, waiting 10s...", flush=True)
+                            sem.release()
+                            await asyncio.sleep(10)
+                            continue
+                    except:
+                        pass
                     print(f"[WORKER DEBUG] No jobs available (204), retrying...", flush=True)
                     sem.release()
                     continue  # Immediately retry long poll
