@@ -543,10 +543,11 @@ async def worker_remote_loop(job_type, sem, config):
                     except Exception as e:
                         print(f"[WORKER DEBUG] Error checking pause status: {e}", flush=True)
                     
-                    # No jobs available - but this shouldn't happen with long polling
-                    # If we get here immediately, something is wrong with long poll
-                    print(f"[WORKER DEBUG] No jobs available (204), retrying...", flush=True)
+                    # No jobs available - wait before retrying to avoid tight loop
+                    # This is a safety measure in case long polling isn't working
+                    print(f"[WORKER DEBUG] No jobs available (204), waiting 5s before retry...", flush=True)
                     sem.release()
+                    await asyncio.sleep(5)
                     continue  # Immediately retry long poll
                 
                 if resp.status_code == 400:
