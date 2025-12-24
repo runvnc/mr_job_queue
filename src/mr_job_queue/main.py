@@ -39,6 +39,7 @@ def load_config():
         "master_url": "",
         "api_key": "",
         "stale_job_timeout_minutes": 60,
+        "queue_paused": False,
         "limits": {
             "default": {
                 "max_global": 5,
@@ -56,6 +57,17 @@ def load_config():
         config.setdefault("limits", {})["default"] = defaults["limits"]["default"]
     
     return config
+
+def is_queue_paused():
+    """Check if the job queue is paused."""
+    config = load_config()
+    return config.get("queue_paused", False)
+
+def set_queue_paused(paused):
+    """Set the queue paused state."""
+    config = load_config()
+    config["queue_paused"] = paused
+    save_config(config)
 
 def get_limits_for_type(job_type, config=None):
     """Get the limits for a specific job type, falling back to default."""
@@ -521,6 +533,11 @@ async def worker_local_loop(job_type, sem, config):
     
     while worker_running.is_set():
         try:
+            # Check if queue is paused
+            if is_queue_paused():
+                await asyncio.sleep(5)
+                continue
+            
             if not await aiofiles.os.path.isdir(queued_job_type_dir):
                 await asyncio.sleep(10) # Dir may not exist yet
                 continue

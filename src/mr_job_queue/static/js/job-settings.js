@@ -5,7 +5,8 @@ class JobQueueSettings extends BaseEl {
   static properties = {
     config: { type: Object },
     loading: { type: Boolean },
-    newJobType: { type: String }
+    newJobType: { type: String },
+    queuePaused: { type: Boolean }
   };
 
   static styles = css`
@@ -76,6 +77,24 @@ class JobQueueSettings extends BaseEl {
     .add-type-row input {
       flex: 1;
     }
+    .pause-section {
+      margin-bottom: 1.5rem;
+      padding: 1rem;
+      border: 2px solid var(--warning, #ed8936);
+      border-radius: 4px;
+      background: var(--warning-bg, rgba(237, 137, 54, 0.1));
+    }
+    .pause-section.paused {
+      border-color: var(--error, #e53e3e);
+      background: var(--error-bg, rgba(229, 62, 62, 0.1));
+    }
+    .pause-btn {
+      font-size: 1.1em;
+      padding: 0.75rem 1.5rem;
+    }
+    .pause-btn.paused {
+      background: var(--success, #48bb78);
+    }
     .section-divider {
       border-top: 1px solid var(--border-color);
       margin: 1.5rem 0;
@@ -95,7 +114,9 @@ class JobQueueSettings extends BaseEl {
     };
     this.loading = true;
     this.newJobType = '';
+    this.queuePaused = false;
     this.loadSettings();
+    this.loadQueueStatus();
   }
 
   async loadSettings() {
@@ -113,6 +134,18 @@ class JobQueueSettings extends BaseEl {
     }
   }
 
+  async loadQueueStatus() {
+    try {
+      const response = await fetch('/api/queue/status');
+      if (response.ok) {
+        const data = await response.json();
+        this.queuePaused = data.paused;
+      }
+    } catch (e) {
+      console.error('Error loading queue status:', e);
+    }
+  }
+
   async saveSettings() {
     try {
       const response = await fetch('/api/config', {
@@ -125,6 +158,22 @@ class JobQueueSettings extends BaseEl {
       }
     } catch (e) {
       alert('Error saving settings: ' + e);
+    }
+  }
+
+  async togglePause() {
+    try {
+      const response = await fetch('/api/queue/pause', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ paused: !this.queuePaused })
+      });
+      if (response.ok) {
+        const data = await response.json();
+        this.queuePaused = data.paused;
+      }
+    } catch (e) {
+      alert('Error toggling pause: ' + e);
     }
   }
 
@@ -160,6 +209,17 @@ class JobQueueSettings extends BaseEl {
     
     return html`
       <h3>Job Queue Configuration</h3>
+      
+      <div class="pause-section ${this.queuePaused ? 'paused' : ''}">
+        <p style="margin: 0 0 0.5rem 0;">
+          <strong>Queue Status:</strong> ${this.queuePaused ? 'PAUSED - No new jobs will be processed' : 'Running'}
+        </p>
+        <button class="pause-btn ${this.queuePaused ? 'paused' : ''}" @click=${this.togglePause}>
+          ${this.queuePaused ? 'Resume Queue' : 'Pause Queue'}
+        </button>
+      </div>
+      
+      <div class="section-divider"></div>
       
       <div class="form-group">
         <label>Mode</label>

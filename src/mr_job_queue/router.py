@@ -22,8 +22,9 @@ from .helpers import sanitize_job_type
 from .main import load_config, get_limits_for_type, count_active_jobs_for_type
 from .main import add_job
 
-# Import worker tracking functions
+# Import worker tracking and queue control functions
 from .main import update_worker_registry, load_workers_registry
+from .main import is_queue_paused, set_queue_paused
 
 router = APIRouter()
 
@@ -59,6 +60,19 @@ async def get_workers(_=Depends(require_admin)):
     registry = load_workers_registry()
     return JSONResponse(registry)
 
+@router.get("/api/queue/status")
+async def get_queue_status(_=Depends(require_user)):
+    """Get the current queue paused status"""
+    return JSONResponse({"paused": is_queue_paused()})
+
+@router.post("/api/queue/pause")
+async def toggle_queue_pause(request: Request, _=Depends(require_admin)):
+    """Toggle or set the queue paused state"""
+    data = await request.json()
+    paused = data.get("paused", not is_queue_paused())  # Toggle if not specified
+    set_queue_paused(paused)
+    return JSONResponse({"paused": paused, "status": "ok"})
+
 @router.post("/api/jobs/lease")
 async def lease_job(request: Request, user=Depends(require_user)):
     """Allow a worker to lease a job from the master"""
@@ -73,6 +87,10 @@ async def lease_job(request: Request, user=Depends(require_user)):
     
     if not worker_id:
         return JSONResponse({"error": "worker_id required"}, status_code=400)
+    
+    # Check if queue is paused
+    if is_queue_paused():
+        return JSONResponse({"status": "paused"}, status_code=204)
     
     # Update worker registry to show it's alive (even if no job available)
     update_worker_registry(worker_id, ip=client_ip)
