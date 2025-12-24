@@ -116,6 +116,13 @@ async def lease_job(request: Request, user=Depends(require_user)):
     
     print(f"[MASTER DEBUG] Checking job types: {target_types}")
 
+    # If no target types found, still do long poll wait
+    if not target_types:
+        print(f"[MASTER DEBUG] No matching job type directories found, waiting {timeout}s...", flush=True)
+        await asyncio.sleep(timeout)
+        print(f"[MASTER DEBUG] No jobs found after {timeout}s, returning 204")
+        return JSONResponse({"status": "empty"}, status_code=204)
+
     start_time = time.time()
     poll_interval = 2  # Check every 2 seconds
     

@@ -529,17 +529,22 @@ async def worker_remote_loop(job_type, sem, config):
                 
                 print(f"[WORKER DEBUG] Lease response: status={resp.status_code}", flush=True)
                 
-                if resp.status_code == 204:  # No jobs available or paused
-                    # Check if paused (response body will indicate)
+                if resp.status_code == 204:  # No jobs available, paused, or no matching types
+                    # Check response text for paused status
+                    resp_text = resp.text
+                    print(f"[WORKER DEBUG] 204 response body: {resp_text}", flush=True)
+                    
                     try:
-                        body = resp.json()
-                        if body.get("status") == "paused":
+                        if resp_text and "paused" in resp_text:
                             print(f"[WORKER DEBUG] Queue is paused, waiting 10s...", flush=True)
                             sem.release()
                             await asyncio.sleep(10)
                             continue
-                    except:
-                        pass
+                    except Exception as e:
+                        print(f"[WORKER DEBUG] Error checking pause status: {e}", flush=True)
+                    
+                    # No jobs available - but this shouldn't happen with long polling
+                    # If we get here immediately, something is wrong with long poll
                     print(f"[WORKER DEBUG] No jobs available (204), retrying...", flush=True)
                     sem.release()
                     continue  # Immediately retry long poll
