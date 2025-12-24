@@ -663,13 +663,11 @@ async def run_remote_job_and_report(job_id, job_data, sem, job_type, client, mas
     try:
         print(f"Executing remote job {job_id}...")
         
-        # Add worker info to job data before execution
-        job_data["executed_by_worker"] = worker_id
-        
+        # job_data already has assigned_worker, assigned_worker_ip, assigned_at from lease
         job_data = await execute_job_core(job_id, job_data)
         
-        # Add worker_id to the report
-        job_data["worker_id"] = worker_id
+        # Include worker_id for registry update on master side
+        job_data["reporting_worker_id"] = worker_id
         
         print(f"Reporting remote job {job_id} back to master...")
         resp = await client.post(f"{master_url}/api/jobs/report/{job_id}", json=job_data)

@@ -191,7 +191,7 @@ async def report_job(job_id: str, request: Request, user=Depends(require_user)):
     report = await request.json()
     status = report.get("status")
     sjt = sanitize_job_type(report.get("job_type", DEFAULT_JOB_TYPE))
-    worker_id = report.get("worker_id")
+    worker_id = report.get("reporting_worker_id")
     client_ip = get_client_ip(request)
     
     active_path = os.path.join(ACTIVE_DIR, sjt, f"{job_id}.json")
@@ -211,6 +211,10 @@ async def report_job(job_id: str, request: Request, user=Depends(require_user)):
     if worker_id:
         update_worker_registry(worker_id, ip=client_ip, job_id=job_id, remove_job=True)
     
+    # Remove internal fields before saving
+    report.pop("reporting_worker_id", None)
+    
+    # Update job data with report (preserves assigned_worker info from original job_data)
     job_data.update(report)
     job_data["updated_at"] = datetime.now().isoformat()
     
