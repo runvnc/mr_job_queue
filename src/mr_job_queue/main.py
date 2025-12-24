@@ -70,11 +70,30 @@ def set_queue_paused(paused):
     save_config(config)
 
 def get_limits_for_type(job_type, config=None):
-    """Get the limits for a specific job type, falling back to default."""
+    """Get the limits for a specific job type.
+    
+    Supports prefix matching: 'default' matches 'default.mr_gemini__...' etc.
+    This allows LLM-specific queues to share the same limits config.
+    """
     if config is None:
         config = load_config()
     limits = config.get("limits", {})
-    type_limits = limits.get(job_type, limits.get("default", {}))
+    
+    # 1. Try exact match first
+    if job_type in limits:
+        type_limits = limits[job_type]
+    else:
+        # 2. Try prefix match (e.g., "default" matches "default.mr_gemini__...")
+        type_limits = None
+        for prefix in limits:
+            if prefix != "default" and job_type.startswith(prefix + "."):
+                type_limits = limits[prefix]
+                break
+        
+        # 3. Fall back to default
+        if type_limits is None:
+            type_limits = limits.get("default", {})
+    
     return {
         "max_global": type_limits.get("max_global", 5),
         "max_per_instance": type_limits.get("max_per_instance", 1)
