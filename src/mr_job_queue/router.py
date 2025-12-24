@@ -98,11 +98,21 @@ async def lease_job(request: Request, user=Depends(require_user)):
     # Update worker registry to show it's alive (even if no job available)
     update_worker_registry(worker_id, ip=client_ip)
     
-    # Find a job to lease
-    target_types = [sanitize_job_type(requested_type)] if requested_type else []
-    if not target_types:
+    # Find job types to check
+    if requested_type:
+        # Worker requested a specific type (or prefix like "default")
+        # Check for exact match or prefix matches in queued dirs
+        target_types = []
         if os.path.exists(QUEUED_DIR):
-            target_types = [d for d in os.listdir(QUEUED_DIR) if os.path.isdir(os.path.join(QUEUED_DIR, d))]
+            for d in os.listdir(QUEUED_DIR):
+                if os.path.isdir(os.path.join(QUEUED_DIR, d)):
+                    # Match exact or prefix (e.g., "default" matches "default.mr_gemini__...")
+                    if d == requested_type or d.startswith(requested_type + "."):
+                        target_types.append(d)
+        print(f"[MASTER DEBUG] Requested type '{requested_type}' matched dirs: {target_types}", flush=True)
+    else:
+        # No type specified, check all
+        target_types = [d for d in os.listdir(QUEUED_DIR) if os.path.isdir(os.path.join(QUEUED_DIR, d))] if os.path.exists(QUEUED_DIR) else []
     
     print(f"[MASTER DEBUG] Checking job types: {target_types}")
 

@@ -768,7 +768,21 @@ async def ensure_job_type_worker_running(job_type):
 
 async def start_job_type_workers():
     """Start workers for job types with pending jobs at startup."""
+    config = load_config()
     print(f"[DEBUG] start_job_type_workers called", flush=True)
+    
+    mode = config.get("mode", "standalone")
+    
+    # In worker mode, start polling for all configured job types
+    if mode == "worker":
+        limits = config.get("limits", {})
+        job_types_to_poll = list(limits.keys())
+        print(f"[DEBUG] Worker mode: will poll for job types from config: {job_types_to_poll}", flush=True)
+        for job_type in job_types_to_poll:
+            await ensure_job_type_worker_running(job_type)
+        return
+    
+    # In master/standalone mode, start workers for queued jobs
     if not await aiofiles.os.path.exists(QUEUED_DIR):
         print(f"[DEBUG] QUEUED_DIR {QUEUED_DIR} does not exist", flush=True)
         return
