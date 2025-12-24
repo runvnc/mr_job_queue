@@ -662,6 +662,10 @@ async def run_remote_job_and_report(job_id, job_data, sem, job_type, client, mas
     """Run job locally and report result back to master."""
     try:
         print(f"Executing remote job {job_id}...")
+        
+        # Add worker info to job data before execution
+        job_data["executed_by_worker"] = worker_id
+        
         job_data = await execute_job_core(job_id, job_data)
         
         # Add worker_id to the report
