@@ -507,7 +507,7 @@ async def worker_remote_loop(job_type, sem, config):
     
     headers = {}
     if config.get("api_key"):
-        headers["Authorization"] = f"Bearer {config['api_key']}"
+        headers["Authorization"] = f"Bearer {config['api_key'].strip()}"
 
     # HTTP timeout must be longer than poll timeout
     http_timeout = poll_timeout + 10

@@ -234,7 +234,7 @@ class JobQueueSettings extends BaseEl {
         <div class="form-group">
           <label>Master URL</label>
           <input type="text" .value=${this.config.master_url || ''} 
-                 @input=${(e) => this.config.master_url = e.target.value}
+                 @input=${(e) => this.config.master_url = e.target.value.trim()}
                  placeholder="https://master-server.example.com">
         </div>
       ` : ''}
@@ -243,7 +243,7 @@ class JobQueueSettings extends BaseEl {
         <div class="form-group">
           <label>API Key (shared secret for auth)</label>
           <input type="password" .value=${this.config.api_key || ''} 
-                 @input=${(e) => this.config.api_key = e.target.value}>
+                 @input=${(e) => this.config.api_key = e.target.value.trim()}>
         </div>
       ` : ''}
       
