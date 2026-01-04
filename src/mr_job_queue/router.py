@@ -26,6 +26,9 @@ from .main import add_job
 from .main import update_worker_registry, load_workers_registry
 from .main import is_queue_paused, set_queue_paused
 
+# Import ChatLog for sync endpoint
+from lib.chatlog import ChatLog
+
 router = APIRouter()
 
 def get_client_ip(request: Request) -> str:
@@ -235,6 +238,53 @@ async def report_job(job_id: str, request: Request, user=Depends(require_user)):
     # Trigger hook on Master
     await hook_manager.job_ended(status, job_data, job_data.get("result"), context=None)
     return {"status": "ok"}
+
+@router.post("/api/chatlog/sync")
+async def sync_chatlog(request: Request, user=Depends(require_user)):
+    """Receive chat log updates from workers.
+    
+    Workers call this endpoint to sync their chat log messages back to the master.
+    The master then updates its local copy of the chat log file.
+    """
+    try:
+        data = await request.json()
+        log_id = data.get("log_id")
+        username = data.get("user")
+        agent = data.get("agent")
+        message = data.get("message")
+        parent_log_id = data.get("parent_log_id")
+        
+        if not all([log_id, username, agent, message]):
+            return JSONResponse(
+                {"error": "Missing required fields: log_id, user, agent, message"},
+                status_code=400
+            )
+        
+        # Load or create the chat log on master
+        try:
+            chatlog = ChatLog(
+                log_id=log_id,
+                user=username,
+                agent=agent,
+                parent_log_id=parent_log_id
+            )
+            
+            # Add the message (this will save to disk)
+            # Note: We call the internal _add_message_impl and _save_log_sync
+            # to avoid triggering the hook again (which would cause infinite loop)
+            chatlog._add_message_impl(message)
+            chatlog._save_log_sync()
+            
+            return JSONResponse({"status": "ok"})
+            
+        except Exception as e:
+            print(f"[CHATLOG SYNC] Error updating chatlog {log_id}: {e}")
+            return JSONResponse({"error": str(e)}, status_code=500)
+            
+    except Exception as e:
+        print(f"[CHATLOG SYNC] Error processing sync request: {e}")
+        print(traceback.format_exc())
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 from lib.chatlog import count_tokens_for_log_id
 

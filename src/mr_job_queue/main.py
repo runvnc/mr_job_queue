@@ -12,6 +12,7 @@ import aiofiles.os
 import httpx
 
 from lib.providers.services import service, service_manager
+from lib.providers.hooks import hook_manager
 from lib.providers.hooks import hook, hook_manager
 from lib.providers.hooks import hook
 from lib.utils.debug import debug_box
@@ -21,6 +22,10 @@ from lib.chatcontext import get_context
 from .filelock import FileLock
 from .helpers import get_job_data, sanitize_job_type
 import nanoid
+
+# Global HTTP client for chatlog sync (reused across requests)
+_sync_client = None
+_sync_client_lock = asyncio.Lock()
 
 debug_box("----------------------------------- JOB_QUEUE STARTING ----------------------------------------------------")
 
@@ -833,9 +838,60 @@ async def startup(app, context=None):
     stale_cleanup_task = asyncio.create_task(cleanup_stale_jobs())
     return {"status": "Worker system initialized"}
 
+# ---------------------------------------------------------------------------
+# Chat log sync hook - syncs messages from worker to master
+# ---------------------------------------------------------------------------
+@hook()
+async def message_added(log_id, user, agent, message, parent_log_id=None, context=None):
+    """Sync chat log message to master when in worker mode.
+    
+    This hook is called by ChatLog.add_message() whenever a message is added.
+    In worker mode, we forward the message to the master so it can update
+    its local copy of the chat log.
+    """
+    global _sync_client
+    
+    config = load_config()
+    if config.get("mode") != "worker":
+        return  # Only sync in worker mode
+    
+    master_url = config.get("master_url", "").rstrip("/")
+    if not master_url:
+        return
+    
+    # Build headers with API key if configured
+    headers = {}
+    if config.get("api_key"):
+        headers["Authorization"] = f"Bearer {config['api_key'].strip()}"
+    
+    try:
+        # Use a shared client for efficiency, create if needed
+        async with _sync_client_lock:
+            if _sync_client is None:
+                _sync_client = httpx.AsyncClient(timeout=10, headers=headers)
+        
+        # Send the message to master
+        await _sync_client.post(f"{master_url}/api/chatlog/sync", json={
+            "log_id": log_id,
+            "user": user,
+            "agent": agent,
+            "message": message,
+            "parent_log_id": parent_log_id
+        })
+    except httpx.TimeoutException:
+        print(f"[CHATLOG SYNC] Timeout syncing message to master for log {log_id}")
+    except httpx.ConnectError:
+        print(f"[CHATLOG SYNC] Connection error syncing to master for log {log_id}")
+    except Exception as e:
+        print(f"[CHATLOG SYNC] Failed to sync message to master for log {log_id}: {e}")
+
+# ---------------------------------------------------------------------------
+# Shutdown hook
+# ---------------------------------------------------------------------------
 @hook()
 async def quit(context=None):
     """Stop the worker and cleanup active tasks when the plugin stops."""
+    global _sync_client
     print("Plugin quit: Stopping job queue worker.")
     worker_running.clear()
     
@@ -846,6 +902,14 @@ async def quit(context=None):
             await stale_cleanup_task
         except asyncio.CancelledError:
             pass
+    
+    # Close the sync client if it exists
+    if _sync_client is not None:
+        try:
+            await _sync_client.aclose()
+            _sync_client = None
+        except Exception as e:
+            print(f"Error closing sync client: {e}")
     
     all_tasks = list(job_type_tasks.values()) + list(active_job_tasks)
     if all_tasks:
