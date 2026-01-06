@@ -850,6 +850,8 @@ async def message_added(log_id, user, agent, message, parent_log_id=None, contex
     its local copy of the chat log.
     """
     global _sync_client
+    #print large colorful header for log
+    print("\n" + "="*10 + " CHATLOG SYNC HOOK TRIGGERED " + "="*10)
     print("[CHATLOG SYNC] message_added hook triggered")
     config = load_config()
     if config.get("mode") != "worker":
