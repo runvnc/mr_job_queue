@@ -247,6 +247,7 @@ async def sync_chatlog(request: Request, user=Depends(require_user)):
     The master then updates its local copy of the chat log file.
     """
     try:
+        print("[CHATLOG SYNC] Received sync request")
         data = await request.json()
         log_id = data.get("log_id")
         username = data.get("user")
