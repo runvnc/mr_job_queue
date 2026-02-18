@@ -225,6 +225,44 @@ stale_cleanup_task = None
 # ---------------------------------------------------------------------------
 @service()
 async def add_job(instructions, agent_name, job_type=None, username=None, metadata=None, job_id=None, llm=None, context=None):
+    config = load_config()
+    
+    # If in worker mode, forward job to master instead of queuing locally
+    if config.get('mode') == 'worker':
+        master_url = config.get('master_url', '').rstrip('/')
+        if master_url:
+            print(f"[WORKER] Forwarding job to master: {master_url}")
+            headers = {}
+            if config.get('api_key'):
+                headers['Authorization'] = f"Bearer {config['api_key'].strip()}"
+            
+            # Build the job payload for master's /api/jobs endpoint
+            payload = {
+                'instructions': instructions,
+                'agent_name': agent_name,
+                'job_type': job_type,
+                'username': username,
+                'metadata': metadata,
+                'job_id': job_id,
+                'llm': llm
+            }
+            
+            try:
+                async with httpx.AsyncClient(timeout=30, headers=headers) as client:
+                    # POST to master's /api/jobs/json endpoint (JSON payload)
+                    resp = await client.post(f"{master_url}/api/jobs/json", json=payload)
+                    
+                    if resp.status_code == 200:
+                        result = resp.json()
+                        print(f"[WORKER] Job forwarded to master, got job_id: {result.get('job_id')}")
+                        return result
+                    else:
+                        print(f"[WORKER] Failed to forward job to master: {resp.status_code} - {resp.text}")
+                        return {"error": f"Failed to forward job to master: {resp.status_code}"}
+            except Exception as e:
+                print(f"[WORKER] Error forwarding job to master: {e}")
+                return {"error": f"Error forwarding job to master: {e}"}
+    
     if job_id is None:
         job_id = f"job_{uuid.uuid4()}"
   
@@ -454,6 +492,28 @@ async def get_job_data_service(job_id, context=None):
     
     Returns job data dict or None if not found.
     """
+    config = load_config()
+    
+    # If in worker mode, query master for job data
+    if config.get('mode') == 'worker':
+        master_url = config.get('master_url', '').rstrip('/')
+        if master_url:
+            headers = {}
+            if config.get('api_key'):
+                headers['Authorization'] = f"Bearer {config['api_key'].strip()}"
+            
+            try:
+                async with httpx.AsyncClient(timeout=10, headers=headers) as client:
+                    resp = await client.get(f"{master_url}/api/jobs/{job_id}")
+                    
+                    if resp.status_code == 200:
+                        return resp.json()
+                    else:
+                        return None
+            except Exception as e:
+                print(f"[WORKER] Error querying master for job {job_id}: {e}")
+                return None
+    
     return await get_job_data(job_id)
 
 # ---------------------------------------------------------------------------

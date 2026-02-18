@@ -84,7 +84,6 @@ async def lease_job(request: Request, user=Depends(require_user)):
     requested_type = data.get("job_type")
     worker_id = data.get("worker_id")
     client_ip = get_client_ip(request)
-    # Long polling timeout - default 15s, max 55s
     requested_timeout = data.get("timeout", 15)
     timeout = min(max(requested_timeout, 1), 55)
     
@@ -93,33 +92,25 @@ async def lease_job(request: Request, user=Depends(require_user)):
     if not worker_id:
         return JSONResponse({"error": "worker_id required"}, status_code=400)
     
-    # Check if queue is paused
     if is_queue_paused():
         print(f"[MASTER DEBUG] Queue is paused, returning 204")
         return JSONResponse({"status": "paused"}, status_code=204)
     
-    # Update worker registry to show it's alive (even if no job available)
     update_worker_registry(worker_id, ip=client_ip)
     
-    # Find job types to check
     if requested_type:
-        # Worker requested a specific type (or prefix like "default")
-        # Check for exact match or prefix matches in queued dirs
         target_types = []
         if os.path.exists(QUEUED_DIR):
             for d in os.listdir(QUEUED_DIR):
                 if os.path.isdir(os.path.join(QUEUED_DIR, d)):
-                    # Match exact or prefix (e.g., "default" matches "default.mr_gemini__...")
                     if d == requested_type or d.startswith(requested_type + "."):
                         target_types.append(d)
         print(f"[MASTER DEBUG] Requested type '{requested_type}' matched dirs: {target_types}", flush=True)
     else:
-        # No type specified, check all
         target_types = [d for d in os.listdir(QUEUED_DIR) if os.path.isdir(os.path.join(QUEUED_DIR, d))] if os.path.exists(QUEUED_DIR) else []
     
     print(f"[MASTER DEBUG] Checking job types: {target_types}")
 
-    # If no target types found, still do long poll wait
     if not target_types:
         print(f"[MASTER DEBUG] No matching job type directories found, waiting {timeout}s...", flush=True)
         await asyncio.sleep(timeout)
@@ -127,19 +118,17 @@ async def lease_job(request: Request, user=Depends(require_user)):
         return JSONResponse({"status": "empty"}, status_code=204)
 
     start_time = time.time()
-    poll_interval = 2  # Check every 2 seconds
+    poll_interval = 2
     
     while time.time() - start_time < timeout:
         for sjt in target_types:
             qdir = os.path.join(QUEUED_DIR, sjt)
             if not os.path.exists(qdir): continue
             
-            # Check global limit for this job type
             limits = get_limits_for_type(sjt, config)
             active_count = count_active_jobs_for_type(sjt)
             if active_count >= limits["max_global"]:
                 print(f"[MASTER DEBUG] Global limit reached for {sjt}: {active_count}/{limits['max_global']}")
-                # Global limit reached for this type, try next type
                 continue
             
             try:
@@ -157,10 +146,8 @@ async def lease_job(request: Request, user=Depends(require_user)):
                 new_path = os.path.join(new_dir, f)
                 
                 try:
-                    # Atomic move to claim the job
                     os.rename(old_path, new_path)
                     
-                    # Read job data and add worker tracking info
                     async with aiofiles.open(new_path, "r") as jf:
                         job_data = json.loads(await jf.read())
                     
@@ -172,17 +159,15 @@ async def lease_job(request: Request, user=Depends(require_user)):
                     async with aiofiles.open(new_path, "w") as jf:
                         await jf.write(json.dumps(job_data, indent=2))
                     
-                    # Update worker registry
                     update_worker_registry(worker_id, ip=client_ip, job_id=job_id)
                     
                     return JSONResponse(job_data)
                 except FileNotFoundError:
-                    continue # Someone else got it
+                    continue
                 except Exception as e:
                     print(f"Lease error: {e}")
                     continue
         
-        # No job found this iteration, wait before checking again
         await asyncio.sleep(poll_interval)
                 
     print(f"[MASTER DEBUG] No jobs found after {timeout}s, returning 204")
@@ -204,20 +189,15 @@ async def report_job(job_id: str, request: Request, user=Depends(require_user)):
     async with aiofiles.open(active_path, "r") as f:
         job_data = json.loads(await f.read())
         
-    # Verify this worker owns the job (optional but recommended)
     assigned_worker = job_data.get("assigned_worker")
     if assigned_worker and worker_id and assigned_worker != worker_id:
         print(f"Warning: Job {job_id} assigned to {assigned_worker} but reported by {worker_id}")
-        # Still accept the report but log the discrepancy
     
-    # Update worker registry - remove job from active list
     if worker_id:
         update_worker_registry(worker_id, ip=client_ip, job_id=job_id, remove_job=True)
     
-    # Remove internal fields before saving
     report.pop("reporting_worker_id", None)
     
-    # Update job data with report (preserves assigned_worker info from original job_data)
     job_data.update(report)
     job_data["updated_at"] = datetime.now().isoformat()
     
@@ -235,17 +215,12 @@ async def report_job(job_id: str, request: Request, user=Depends(require_user)):
     
     os.remove(active_path)
     
-    # Trigger hook on Master
     await hook_manager.job_ended(status, job_data, job_data.get("result"), context=None)
     return {"status": "ok"}
 
 @router.post("/api/chatlog/sync")
 async def sync_chatlog(request: Request, user=Depends(require_user)):
-    """Receive chat log updates from workers.
-    
-    Workers call this endpoint to sync their chat log messages back to the master.
-    The master then updates its local copy of the chat log file.
-    """
+    """Receive chat log updates from workers."""
     try:
         print("[CHATLOG SYNC] Received sync request")
         data = await request.json()
@@ -261,7 +236,6 @@ async def sync_chatlog(request: Request, user=Depends(require_user)):
                 status_code=400
             )
         
-        # Load or create the chat log on master
         try:
             chatlog = ChatLog(
                 log_id=log_id,
@@ -270,9 +244,6 @@ async def sync_chatlog(request: Request, user=Depends(require_user)):
                 parent_log_id=parent_log_id
             )
             
-            # Add the message (this will save to disk)
-            # Note: We call the internal _add_message_impl and _save_log_sync
-            # to avoid triggering the hook again (which would cause infinite loop)
             chatlog._add_message_impl(message)
             chatlog._save_log_sync()
             
@@ -302,13 +273,10 @@ async def index(request: Request, user=Depends(require_user)):
 async def list_jobs(request: Request, status: str = None, job_type: str = None, limit: int = 50, user=Depends(require_user)):
     """Get a list of jobs with optional filtering"""
     try:
-        # Get context if available, otherwise pass None
         context = None
         if hasattr(request.state, 'context'):
             context = request.state.context
         
-        # Call get_jobs with appropriate parameters
-        # Admins see all jobs, others see only their own
         uname_filter = None if 'admin' in getattr(user, 'roles', []) else user.username
 
         jobs = await get_jobs(status=status, job_type=job_type, username=uname_filter, limit=limit, context=context)
@@ -316,7 +284,6 @@ async def list_jobs(request: Request, status: str = None, job_type: str = None, 
     except Exception as e:
         print(e)
         return JSONResponse({"error": str(e)}, status_code=500)
-
 
 @router.get("/api/jobs/search")
 async def search_jobs_endpoint(
@@ -332,40 +299,31 @@ async def search_jobs_endpoint(
 ):
     """Search jobs with metadata filtering and date range"""
     try:
-        # Extract metadata from query parameters
-        # Any query param that is not a standard search parameter is treated as metadata
         query_params = dict(request.query_params)
         known_params = {'api_key', 'metadata_query', 'before_date', 'after_date', 'username', 'output',
                        'status', 'job_type', 'limit', 'offset'}
         
-        # Build metadata dict from unknown parameters
         metadata_dict = {}
         for key, value in query_params.items():
             if key not in known_params:
                 metadata_dict[key] = value
         
-        # Also parse metadata_query if provided (for backward compatibility)
         if metadata_query:
             try:
                 parsed_metadata = json.loads(metadata_query)
-                # Filter out known_params from parsed metadata_query
                 for key, value in parsed_metadata.items():
                     if key not in known_params:
                         metadata_dict[key] = value
             except json.JSONDecodeError:
                 return JSONResponse({"error": "Invalid metadata_query format"}, status_code=400)
         
-        # Get context if available
         context = None
         if hasattr(request.state, 'context'):
             context = request.state.context
-        # Admins see all jobs, others see only their own
         username_filter = None if 'admin' in getattr(user, 'roles', []) else user.username
         
-        # Import the search_jobs command
         from .commands import search_jobs
         
-        # Perform search
         result = await search_jobs(
             metadata_query=metadata_dict,
             before_date=before_date,
@@ -378,25 +336,19 @@ async def search_jobs_endpoint(
             context=context
         )
         
-        # Check for simplified output format
         if query_params.get('output') == 'results':
-            # Return array of [created_at, job_id, instructions, status, result]
             simplified = []
             for job in result['jobs']:
                 simplified.append([job.get('created_at', ''), job.get('id', ''), job.get('instructions', ''), job.get('status', ''), job.get('result', '')])
             return JSONResponse(simplified)
         
-        # Check for CSV output format
         if query_params.get('output') == 'csv':
-            # Generate CSV with [instructions], [status], [result] format
             import csv
             output = io.StringIO()
             writer = csv.writer(output)
             
-            # Write header
             writer.writerow(['Created At', 'Job ID', 'Instructions', 'Status', 'Result'])
             
-            # Write data rows
             for job in result['jobs']:
                 writer.writerow([
                     job.get('created_at', ''),
@@ -406,7 +358,6 @@ async def search_jobs_endpoint(
                     job.get('result', '')
                 ])
             
-            # Return CSV as streaming response
             output.seek(0)
             return StreamingResponse(
                 io.BytesIO(output.getvalue().encode('utf-8')),
@@ -424,7 +375,6 @@ async def search_jobs_endpoint(
 async def get_job(request: Request, job_id: str, user=Depends(require_user)):
     """Get details for a specific job"""
     try:
-        # Get context if available, otherwise pass None
         context = None
         if hasattr(request.state, 'context'):
             context = request.state.context
@@ -440,7 +390,7 @@ async def get_job(request: Request, job_id: str, user=Depends(require_user)):
         return JSONResponse({"error": str(e)}, status_code=500)
 
 @router.post("/api/jobs")
-async def create_job(
+async def create_job_form(
     request: Request,
     instructions: str = Form(...),
     agent: str = Form(...),
@@ -449,14 +399,12 @@ async def create_job(
     files: List[UploadFile] = File([]),
     user=Depends(require_user)
 ):
-    """Submit a new job with optional file uploads"""
+    """Submit a new job via form data (for web UI with file uploads)."""
     try:
-        # Get context if available, otherwise pass None
         context = None
         if hasattr(request.state, 'context'):
             context = request.state.context
         
-        # Parse metadata if provided
         metadata_dict = None
         if metadata:
             try:
@@ -464,28 +412,23 @@ async def create_job(
             except json.JSONDecodeError:
                 return JSONResponse({"error": "Invalid metadata format"}, status_code=400)
         
-        # Handle file uploads if any
         uploaded_files = []
         if files:
-            # Create a directory for uploaded files if it doesn't exist
             upload_dir = os.path.join("data", "uploads")
             os.makedirs(upload_dir, exist_ok=True)
             
             for file in files:
-                # Save the file
                 file_path = os.path.join(upload_dir, file.filename)
                 content = await file.read()
                 async with aiofiles.open(file_path, "wb") as f:
                     await f.write(content)
                 uploaded_files.append(file_path)
         
-        # Add uploaded files to metadata
         if uploaded_files:
             if not metadata_dict:
                 metadata_dict = {}
             metadata_dict["uploaded_files"] = uploaded_files
         
-        # Submit the job
         result = await add_job(
             instructions=instructions,
             agent_name=agent,
@@ -501,11 +444,47 @@ async def create_job(
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
+@router.post("/api/jobs/json")
+async def create_job_json(
+    request: Request,
+    user=Depends(require_user)
+):
+    """Submit a new job via JSON payload (for workers and API clients)."""
+    try:
+        data = await request.json()
+        
+        instructions = data.get('instructions')
+        agent_name = data.get('agent_name')
+        job_type = data.get('job_type')
+        metadata = data.get('metadata')
+        job_id = data.get('job_id')
+        llm = data.get('llm')
+        username = data.get('username') or getattr(user, 'username', 'worker')
+        
+        if not instructions or not agent_name:
+            return JSONResponse({"error": "instructions and agent_name are required"}, status_code=400)
+        
+        result = await add_job(
+            instructions=instructions,
+            agent_name=agent_name,
+            job_type=job_type,
+            metadata=metadata,
+            job_id=job_id,
+            llm=llm,
+            username=username,
+            context=None
+        )
+        
+        if "error" in result:
+            return JSONResponse({"error": result["error"]}, status_code=500)
+        return JSONResponse(result)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
 @router.delete("/api/jobs/{job_id}")
 async def delete_job(request: Request, job_id: str, user=Depends(require_user)):
     """Cancel a job"""
     try:
-        # Get context if available, otherwise pass None
         context = None
         if hasattr(request.state, 'context'):
             context = request.state.context
@@ -520,7 +499,6 @@ async def delete_job(request: Request, job_id: str, user=Depends(require_user)):
 @router.post("/api/cleanup")
 async def cleanup(request: Request, user=Depends(require_user)):
     """Clean up old jobs"""
-    # Require admin role
     if "admin" not in user.roles:
         return JSONResponse({"error": "Admin access required"}, status_code=403)
     
@@ -529,7 +507,6 @@ async def cleanup(request: Request, user=Depends(require_user)):
         status = data.get("status", "completed")
         older_than_days = data.get("older_than_days", 30)
         
-        # Get context if available, otherwise pass None
         context = None
         if hasattr(request.state, 'context'):
             context = request.state.context
@@ -549,7 +526,6 @@ async def get_stats(request: Request, user=Depends(require_user)):
     """Get job queue statistics"""
     try:
         counts = {}
-        # Initialize counts for each status
         for status in ["queued", "active", "completed", "failed"]:
             counts[status] = 0
             
@@ -560,40 +536,33 @@ async def get_stats(request: Request, user=Depends(require_user)):
             ("failed", FAILED_DIR)
         ]:
             try:
-                # Ensure directory exists
                 if not await aiofiles.os.path.isdir(status_dir):
                     await aiofiles.os.makedirs(status_dir, exist_ok=True)
                     
-                # Count files in the base directory (legacy jobs)
                 files = await aiofiles.os.listdir(status_dir)
                 base_count = len([f for f in files if f.endswith('.json')])
                 counts[status_name] += base_count
                 
-                # Count files in job type subdirectories
                 for item in files:
                     item_path = os.path.join(status_dir, item)
                     if await aiofiles.os.path.isdir(item_path):
                         try:
-                            # This is a job type directory
                             type_files = await aiofiles.os.listdir(item_path)
                             type_count = len([f for f in type_files if f.endswith('.json')])
                             counts[status_name] += type_count
                             
-                            # Optionally, track counts per job type
                             original_job_type = item
                             job_type = sanitize_job_type(original_job_type)
                             type_key = f"{status_name}_{job_type}"
                             counts[type_key] = type_count
                         except Exception as e:
                             print(f"Error counting files in {item_path}: {e}")
-                            # Continue with other directories
                             continue
                 
             except FileNotFoundError:
-                counts[status_name] = 0 # Should not happen if makedirs worked
+                counts[status_name] = 0
             except Exception as e:
                 print(f"Error getting stats for {status_name}: {e}")
-                # Keep the count at 0 and continue
         
         stats = {
             "queued": counts.get("queued", 0),
@@ -601,12 +570,8 @@ async def get_stats(request: Request, user=Depends(require_user)):
             "completed": counts.get("completed", 0),
             "failed": counts.get("failed", 0),
             "total": sum(counts.values())
-            
-            # Include job type specific counts if available
-            # This will add entries like queued_default, active_default, etc.
         }
         
-        # Add job type specific counts to stats
         for key, value in counts.items():
             if key not in ["queued", "active", "completed", "failed"]:
                 stats[key] = value
@@ -619,17 +584,14 @@ async def get_stats(request: Request, user=Depends(require_user)):
 async def get_job_token_counts(request: Request, job_id: str, user=Depends(require_user)):
     """Get token counts for a specific job including delegated tasks"""
     try:
-        # Get context if available, otherwise pass None
         context = None
         if hasattr(request.state, 'context'):
             context = request.state.context
             
-        # Get the job to verify it exists and get the log_id
         job = await get_job_status(job_id, context=context)
         if "error" in job and job['error'] is not None:
             return JSONResponse({"error": job["error"]}, status_code=404)
         
-        # Use the job_id as the log_id for token counting
         token_counts = await count_tokens_for_log_id(job_id, user=user.username, hierarchical=True)
         
         if token_counts is None:
@@ -655,43 +617,35 @@ async def create_bulk_jobs(
 ):
     """Submit multiple jobs with the same parameters but different instructions"""
     try:
-        # Get context if available
         context = None
         if hasattr(request.state, 'context'):
             context = request.state.context
         
-        # Determine which instruction format was provided
         instructions_data = None
         
         if instructions:
-            # Form field list (multiple -F "instructions=...")
             instructions_data = instructions
         elif instructions_file:
-            # File upload with one instruction per line
             content = await instructions_file.read()
             text = content.decode('utf-8')
             instructions_data = [line.strip() for line in text.split('\n') if line.strip()]
         elif instructions_csv:
-            # CSV format
             instructions_data = [instr.strip() for instr in instructions_csv.split(',') if instr.strip()]
         else:
             return JSONResponse({"error": "No instructions provided. Use instructions, instructions_file, or instructions_csv"}, status_code=400)
         
-        # Validate instructions
         if not isinstance(instructions_data, list):
             return JSONResponse({"error": "Instructions must be a list"}, status_code=400)
         
         if len(instructions_data) == 0:
             return JSONResponse({"error": "Instructions list cannot be empty"}, status_code=400)
         
-        # Validate all instructions are strings
         for i, instr in enumerate(instructions_data):
             if not isinstance(instr, str):
                 return JSONResponse({"error": f"Instruction at index {i} must be a string"}, status_code=400)
             if not instr.strip():
                 return JSONResponse({"error": f"Instruction at index {i} cannot be empty"}, status_code=400)
         
-        # Parse metadata if provided
         metadata_dict = None
         if metadata:
             try:
@@ -699,7 +653,6 @@ async def create_bulk_jobs(
             except json.JSONDecodeError:
                 return JSONResponse({"error": "Invalid metadata format"}, status_code=400)
         
-        # Handle file uploads if any
         uploaded_files = []
         if files:
             upload_dir = os.path.join("data", "uploads")
@@ -712,13 +665,11 @@ async def create_bulk_jobs(
                     await f.write(content)
                 uploaded_files.append(file_path)
         
-        # Add uploaded files to metadata
         if uploaded_files:
             if not metadata_dict:
                 metadata_dict = {}
             metadata_dict["uploaded_files"] = uploaded_files
         
-        # Submit each job
         results = []
         for i, instructions in enumerate(instructions_data):
             if not isinstance(instructions, str):
@@ -726,14 +677,13 @@ async def create_bulk_jobs(
                 continue
             
             job_id = nanoid.generate()
-            # Create a copy of metadata for this job with the job_id
             job_metadata = dict(metadata_dict) if metadata_dict else {}
             job_metadata['bulk_job_id'] = job_id
             job_metadata['bulk_index'] = i
             job_metadata['search_key'] = search_key
 
             result = await add_job(
-                instructions=instructions,  # Keep raw instructions
+                instructions=instructions,
                 agent_name=agent,
                 job_id=job_id,
                 job_type=job_type,
@@ -757,5 +707,3 @@ async def create_bulk_jobs(
         print(f"Error in bulk job submission: {e}")
         print(traceback.format_exc())
         return JSONResponse({"error": str(e)}, status_code=500)
-
-
