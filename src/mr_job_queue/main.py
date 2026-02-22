@@ -10,6 +10,7 @@ import traceback
 import aiofiles
 import aiofiles.os
 import httpx
+import hashlib
 
 from lib.providers.services import service, service_manager
 from lib.providers.hooks import hook_manager
@@ -28,6 +29,30 @@ _sync_client = None
 _sync_client_lock = asyncio.Lock()
 
 debug_box("----------------------------------- JOB_QUEUE STARTING ----------------------------------------------------")
+
+_last_context_mtimes = {}
+
+async def get_context_data_if_changed(log_id, username):
+    context_dir = os.environ.get('CHATCONTEXT_DIR', 'data/context')
+    context_file = f'{context_dir}/{username}/context_{log_id}.json'
+    
+    try:
+        stat = await aiofiles.os.stat(context_file)
+        mtime = stat.st_mtime
+        
+        if _last_context_mtimes.get(log_id) == mtime:
+            return None
+            
+        _last_context_mtimes[log_id] = mtime
+        
+        async with aiofiles.open(context_file, 'r') as f:
+            content = await f.read()
+        return json.loads(content)
+    except FileNotFoundError:
+        return None
+    except Exception as e:
+        print(f"Error reading context file {context_file}: {e}")
+        return None
 
 # Configuration handling
 CONFIG_PATH = "data/jobs/config.json"
@@ -734,6 +759,21 @@ async def run_remote_job_and_report(job_id, job_data, sem, job_type, client, mas
         # Include worker_id for registry update on master side
         job_data["reporting_worker_id"] = worker_id
         
+        # Sync final context
+        log_id = job_data.get("log_id")
+        username = job_data.get("username")
+        if log_id and username:
+            context_data = await get_context_data_if_changed(log_id, username)
+            if context_data:
+                try:
+                    await client.post(f"{master_url}/api/chatlog/sync", json={
+                        "log_id": log_id,
+                        "user": username,
+                        "context_data": context_data
+                    })
+                except Exception as e:
+                    print(f"Failed to sync final context for job {job_id}: {e}")
+        
         print(f"Reporting remote job {job_id} back to master...")
         resp = await client.post(f"{master_url}/api/jobs/report/{job_id}", json=job_data)
         if not resp.is_success:
@@ -932,14 +972,20 @@ async def message_added(log_id, user, agent, message, parent_log_id=None, contex
             if _sync_client is None:
                 _sync_client = httpx.AsyncClient(timeout=10, headers=headers)
         
-        # Send the message to master
-        await _sync_client.post(f"{master_url}/api/chatlog/sync", json={
+        context_data = await get_context_data_if_changed(log_id, user)
+        
+        payload = {
             "log_id": log_id,
             "user": user,
             "agent": agent,
             "message": message,
             "parent_log_id": parent_log_id
-        })
+        }
+        if context_data:
+            payload["context_data"] = context_data
+            
+        # Send the message to master
+        await _sync_client.post(f"{master_url}/api/chatlog/sync", json=payload)
     except httpx.TimeoutException:
         print(f"[CHATLOG SYNC] Timeout syncing message to master for log {log_id}")
     except httpx.ConnectError:

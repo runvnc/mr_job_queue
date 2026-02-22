@@ -229,23 +229,43 @@ async def sync_chatlog(request: Request, user=Depends(require_user)):
         agent = data.get("agent")
         message = data.get("message")
         parent_log_id = data.get("parent_log_id")
+        context_data = data.get("context_data")
         
-        if not all([log_id, username, agent, message]):
+        if not log_id or not username:
             return JSONResponse(
-                {"error": "Missing required fields: log_id, user, agent, message"},
+                {"error": "Missing required fields: log_id, user"},
+                status_code=400
+            )
+            
+        if not message and not context_data:
+            return JSONResponse(
+                {"error": "Must provide either message or context_data"},
                 status_code=400
             )
         
         try:
-            chatlog = ChatLog(
-                log_id=log_id,
-                user=username,
-                agent=agent,
-                parent_log_id=parent_log_id
-            )
+            if message:
+                if not agent:
+                    return JSONResponse(
+                        {"error": "Missing required field: agent (required for message)"},
+                        status_code=400
+                    )
+                chatlog = ChatLog(
+                    log_id=log_id,
+                    user=username,
+                    agent=agent,
+                    parent_log_id=parent_log_id
+                )
+                
+                chatlog._add_message_impl(message)
+                chatlog._save_log_sync()
             
-            chatlog._add_message_impl(message)
-            chatlog._save_log_sync()
+            if context_data:
+                context_dir = os.environ.get('CHATCONTEXT_DIR', 'data/context')
+                context_file = f'{context_dir}/{username}/context_{log_id}.json'
+                os.makedirs(os.path.dirname(context_file), exist_ok=True)
+                async with aiofiles.open(context_file, 'w') as f:
+                    await f.write(json.dumps(context_data, indent=2))
             
             return JSONResponse({"status": "ok"})
             
