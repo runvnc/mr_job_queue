@@ -211,6 +211,20 @@ class JobQueueSettings extends BaseEl {
     }
   }
 
+  async loadMonitor() {
+    try {
+      const [statsRes, workersRes] = await Promise.all([
+        fetch('/api/stats'),
+        fetch('/api/workers')
+      ]);
+      if (statsRes.ok) this.monitorStats = await statsRes.json();
+      if (workersRes.ok) this.workers = await workersRes.json();
+      this.monitorLastUpdated = new Date().toLocaleTimeString();
+    } catch (e) {
+      console.error('Error loading monitor data:', e);
+    }
+  }
+
   async saveSettings() {
     try {
       const response = await fetch('/api/config', {
