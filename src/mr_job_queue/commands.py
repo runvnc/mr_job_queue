@@ -1,4 +1,4 @@
-import os, json, heapq, asyncio
+import os, json, heapq, asyncio, httpx
 from datetime import datetime, timedelta
 import aiofiles
 import aiofiles.os
@@ -25,6 +25,8 @@ DEFAULT_JOB_TYPE = "default"
 
 # Helpers from mr_job_queue.helpers
 from .helpers import get_job_data, sanitize_job_type
+
+from .main import active_job_tasks, cancel_active_job_task, load_workers_registry
 
 # ---------------------------------------------------------------------------
 # IN-MEMORY CACHE FOR JOB LISTINGS
@@ -360,33 +362,82 @@ async def get_jobs(status=None, job_type=None, username=None, limit:int=50, cont
 @command()
 async def cancel_job(job_id, context=None):
     jd = await get_job_data(job_id)
-    if not jd or jd.get("status") != "queued":
-        return {"error": "Job not found or not queued"}
+    if not jd:
+        return {"error": "Job not found"}
+
+    status = jd.get("status")
     ojt = jd.get("job_type", DEFAULT_JOB_TYPE)
     sjt = sanitize_job_type(ojt)
-    qpath = f"{QUEUED_DIR}/{sjt}/{job_id}.json"
-    if not await aiofiles.os.path.exists(qpath):
-        return {"error": "Job file missing"}
 
-    jd.update({
-        "status": "failed",
-        "error": "Job cancelled by user",
-        "updated_at": datetime.now().isoformat(),
-        "completed_at": datetime.now().isoformat()
-    })
-    fpath = f"{FAILED_DIR}/{job_id}.json"
-    async with aiofiles.open(fpath, "w") as f:
-        await f.write(json.dumps(jd, indent=2))
-    await aiofiles.os.remove(qpath)
-    
-    # Invalidate cache
-    await _job_cache.invalidate("queued")
-    await _job_cache.invalidate("failed")
-    
-    # Trigger hook
-    await hook_manager.job_ended("cancelled", jd, None, context=None)
-    
-    return {"success": True}
+    if status == "queued":
+        qpath = f"{QUEUED_DIR}/{sjt}/{job_id}.json"
+        if not await aiofiles.os.path.exists(qpath):
+            return {"error": "Job file missing"}
+        jd.update({
+            "status": "failed",
+            "error": "Job cancelled by user",
+            "updated_at": datetime.now().isoformat(),
+            "completed_at": datetime.now().isoformat()
+        })
+        fpath = f"{FAILED_DIR}/{job_id}.json"
+        async with aiofiles.open(fpath, "w") as f:
+            await f.write(json.dumps(jd, indent=2))
+        await aiofiles.os.remove(qpath)
+        await _job_cache.invalidate("queued")
+        await _job_cache.invalidate("failed")
+        await hook_manager.job_ended("cancelled", jd, None, context=None)
+        return {"success": True}
+
+    elif status == "active":
+        # Find the active file
+        apath = f"{ACTIVE_DIR}/{sjt}/{job_id}.json"
+        if not await aiofiles.os.path.exists(apath):
+            return {"error": "Active job file missing"}
+
+        # Update job data and move to failed
+        jd.update({
+            "status": "failed",
+            "error": "Job cancelled by user",
+            "updated_at": datetime.now().isoformat(),
+            "completed_at": datetime.now().isoformat()
+        })
+        failed_type_dir = f"{FAILED_DIR}/{sjt}"
+        await aiofiles.os.makedirs(failed_type_dir, exist_ok=True)
+        fpath = f"{failed_type_dir}/{job_id}.json"
+        async with aiofiles.open(fpath, "w") as f:
+            await f.write(json.dumps(jd, indent=2))
+        await aiofiles.os.remove(apath)
+
+        # Cancel the running task
+        assigned_worker = jd.get("assigned_worker")
+        username = jd.get("username", "system")
+        if assigned_worker:
+            # Worker job - try to cancel on the worker via its URL
+            registry = load_workers_registry()
+            worker_info = registry.get(assigned_worker, {})
+            worker_url = worker_info.get("worker_url", "").rstrip("/")
+            if worker_url:
+                try:
+                    async with httpx.AsyncClient(timeout=10) as client:
+                        await client.post(f"{worker_url}/api/jobs/cancel/{job_id}",
+                                          json={"username": username})
+                    print(f"[CANCEL] Sent cancel request to worker {assigned_worker} at {worker_url}")
+                except Exception as e:
+                    print(f"[CANCEL] Failed to reach worker {assigned_worker}: {e}")
+            else:
+                print(f"[CANCEL] Worker {assigned_worker} has no worker_url, cannot cancel remotely")
+        else:
+            # Local job - cancel via context mechanism
+            asyncio.create_task(cancel_active_job_task(job_id, username))
+
+        await _job_cache.invalidate("active")
+        await _job_cache.invalidate("failed")
+        await hook_manager.job_ended("cancelled", jd, None, context=None)
+        return {"success": True, "note": "active job cancelled"}
+
+    else:
+        return {"error": f"Cannot cancel job with status '{status}'"}
+
 
 # ---------------------------------------------------------------------------
 # cleanup_jobs (simple)
@@ -533,6 +584,13 @@ async def delegate_job(instructions: str, agent_name: str, job_type: str = None,
     # Use agent_name as default job_type if not specified
     if job_type is None:
         job_type = f"delegated.{agent_name}"
+        print(
+            f"[DELEGATE_JOB] WARNING: No job_type specified, defaulting to '{job_type}'. "
+            f"Workers polling for a different type (e.g. 'call') will NOT pick this up. "
+            f"Pass job_type explicitly if you want a specific worker pool to handle this.",
+            flush=True
+        )
+    print(f"[DELEGATE_JOB] Queuing job: agent='{agent_name}' job_type='{job_type}' caller_log_id={getattr(context, 'log_id', None)}", flush=True)
     
     # Get LLM from context if available
     llm = None
@@ -567,6 +625,11 @@ async def delegate_job(instructions: str, agent_name: str, job_type: str = None,
         return f"Failed to queue job: {result['error']}"
     
     queued_job_id = result["job_id"]
+    print(
+        f"[DELEGATE_JOB] Job queued as job_id={queued_job_id} type='{job_type}', "
+        f"now waiting (timeout={timeout}s)...",
+        flush=True
+    )
     
     # Note: job uses job_id as log_id, so they're the same
     # Invalidate cache for queued jobs

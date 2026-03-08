@@ -6,7 +6,10 @@ class JobQueueSettings extends BaseEl {
     config: { type: Object },
     loading: { type: Boolean },
     newJobType: { type: String },
-    queuePaused: { type: Boolean }
+    queuePaused: { type: Boolean },
+    workers: { type: Object },
+    monitorStats: { type: Object },
+    monitorLastUpdated: { type: String }
   };
 
   static styles = css`
@@ -99,6 +102,63 @@ class JobQueueSettings extends BaseEl {
       border-top: 1px solid var(--border-color);
       margin: 1.5rem 0;
     }
+    .monitor-section {
+      margin-top: 1.5rem;
+      padding: 1rem;
+      border: 1px solid var(--border-color);
+      border-radius: 4px;
+    }
+    .monitor-section h3 {
+      margin-top: 0;
+      margin-bottom: 0.25rem;
+      color: var(--text-color);
+    }
+    .monitor-updated {
+      font-size: 0.75em;
+      color: var(--text-secondary);
+      margin-bottom: 1rem;
+    }
+    .monitor-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.9em;
+      margin-bottom: 1rem;
+    }
+    .monitor-table th {
+      text-align: left;
+      padding: 0.4rem 0.6rem;
+      background: var(--background-secondary);
+      color: var(--text-secondary);
+      font-weight: 600;
+      border-bottom: 1px solid var(--border-color);
+    }
+    .monitor-table td {
+      padding: 0.4rem 0.6rem;
+      border-bottom: 1px solid var(--border-color);
+    }
+    .monitor-table tr:last-child td {
+      border-bottom: none;
+    }
+    .util-bar-bg {
+      background: var(--border-color);
+      border-radius: 3px;
+      height: 8px;
+      width: 80px;
+      display: inline-block;
+      vertical-align: middle;
+      margin-right: 4px;
+    }
+    .util-bar-fill {
+      height: 8px;
+      border-radius: 3px;
+      background: var(--primary);
+      transition: width 0.3s;
+    }
+    .util-bar-fill.warn { background: var(--warning, #ed8936); }
+    .util-bar-fill.full { background: var(--error, #e53e3e); }
+    .worker-dead { color: var(--error, #e53e3e); }
+    .worker-ok { color: var(--success, #48bb78); }
+    .worker-idle { color: var(--text-secondary); }
   `;
 
   constructor() {
@@ -115,8 +175,13 @@ class JobQueueSettings extends BaseEl {
     this.loading = true;
     this.newJobType = '';
     this.queuePaused = false;
+    this.workers = {};
+    this.monitorStats = {};
+    this.monitorLastUpdated = '';
     this.loadSettings();
     this.loadQueueStatus();
+    this.loadMonitor();
+    this._monitorInterval = setInterval(() => this.loadMonitor(), 10000);
   }
 
   async loadSettings() {
@@ -298,7 +363,93 @@ class JobQueueSettings extends BaseEl {
       <div class="section-divider"></div>
       
       <button @click=${this.saveSettings}>Save Configuration</button>
+
+      ${this._renderMonitor()}
     `;
+  }
+
+  _renderMonitor() {
+    const now = Date.now();
+    const workerEntries = Object.entries(this.workers || {});
+    const stats = this.monitorStats || {};
+    const limits = (this.config && this.config.limits) || {};
+
+    // Build per-type rows: collect all type keys from stats
+    const typeKeys = Object.keys(stats)
+      .filter(k => !['queued','active','completed','failed','total'].includes(k))
+      .reduce((acc, k) => {
+        // stats keys look like "active_call.KatieFullVerify" or "queued_verification"
+        const m = k.match(/^(queued|active)_(.+)$/);
+        if (m) acc.add(m[2]);
+        return acc;
+      }, new Set());
+
+    // Also add types from limits config
+    Object.keys(limits).forEach(t => typeKeys.add(t));
+
+    const typeRows = Array.from(typeKeys).sort().map(t => {
+      const queued = stats['queued_' + t] || 0;
+      const active = stats['active_' + t] || 0;
+      // find matching limit via prefix
+      let lim = limits[t];
+      if (!lim) {
+        for (const prefix of Object.keys(limits)) {
+          if (prefix !== 'default' && t.startsWith(prefix + '.')) { lim = limits[prefix]; break; }
+        }
+      }
+      if (!lim) lim = limits['default'] || { max_global: 5, max_per_instance: 1 };
+      const maxG = lim.max_global || 5;
+      const maxI = lim.max_per_instance || 1;
+      const pct = Math.min(100, Math.round(active / maxG * 100));
+      const fillClass = pct >= 100 ? 'full' : pct >= 75 ? 'warn' : '';
+      return html`
+        <tr>
+          <td>${t}</td>
+          <td>${queued}</td>
+          <td>${active}</td>
+          <td>${maxG}</td>
+          <td>${maxI}</td>
+          <td>
+            <span class="util-bar-bg">
+              <div class="util-bar-fill ${fillClass}" style="width:${pct}%"></div>
+            </span>
+            ${active}/${maxG}
+          </td>
+        </tr>`;
+    });
+
+    const workerRows = workerEntries.map(([wid, info]) => {
+      const lastSeen = info.last_seen ? new Date(info.last_seen) : null;
+      const ageSec = lastSeen ? Math.round((now - lastSeen.getTime()) / 1000) : null;
+      const ageStr = ageSec === null ? '?' : ageSec < 60 ? ageSec + 's ago' : Math.round(ageSec/60) + 'm ago';
+      const statusClass = ageSec === null ? '' : ageSec > 600 ? 'worker-dead' : ageSec > 120 ? 'worker-idle' : 'worker-ok';
+      const activeJobs = (info.active_jobs || []).length;
+      return html`
+        <tr>
+          <td class="${statusClass}">${wid}</td>
+          <td>${info.ip || '-'}</td>
+          <td class="${statusClass}">${ageStr}</td>
+          <td>${activeJobs}</td>
+        </tr>`;
+    });
+
+    return html`
+      <div class="monitor-section">
+        <h3>Live Monitor</h3>
+        <div class="monitor-updated">Updated: ${this.monitorLastUpdated || '...'} (auto-refresh 10s)</div>
+
+        <strong>Workers</strong>
+        <table class="monitor-table">
+          <thead><tr><th>Worker ID</th><th>IP</th><th>Last Seen</th><th>Active Jobs</th></tr></thead>
+          <tbody>${workerEntries.length ? workerRows : html`<tr><td colspan="4" style="color:var(--text-secondary)">No workers registered</td></tr>`}</tbody>
+        </table>
+
+        <strong>Per-Type Utilization</strong>
+        <table class="monitor-table">
+          <thead><tr><th>Type</th><th>Queued</th><th>Active</th><th>Max Global</th><th>Max/Inst</th><th>Utilization</th></tr></thead>
+          <tbody>${typeRows.length ? typeRows : html`<tr><td colspan="6" style="color:var(--text-secondary)">No data</td></tr>`}</tbody>
+        </table>
+      </div>`;
   }
 }
 customElements.define('job-queue-settings', JobQueueSettings);

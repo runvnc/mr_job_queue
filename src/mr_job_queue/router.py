@@ -25,6 +25,7 @@ from .main import add_job
 # Import worker tracking and queue control functions
 from .main import update_worker_registry, load_workers_registry
 from .main import is_queue_paused, set_queue_paused
+from .main import cancel_active_job_task
 
 # Import ChatLog for sync endpoint
 from lib.chatlog import ChatLog
@@ -84,6 +85,7 @@ async def lease_job(request: Request, user=Depends(require_user)):
     requested_type = data.get("job_type")
     worker_id = data.get("worker_id")
     client_ip = get_client_ip(request)
+    worker_url = data.get("worker_url", "")
     requested_timeout = data.get("timeout", 15)
     timeout = min(max(requested_timeout, 1), 55)
     
@@ -96,9 +98,10 @@ async def lease_job(request: Request, user=Depends(require_user)):
         print(f"[MASTER DEBUG] Queue is paused, returning 204")
         return JSONResponse({"status": "paused"}, status_code=204)
     
-    update_worker_registry(worker_id, ip=client_ip)
+    update_worker_registry(worker_id, ip=client_ip, worker_url=worker_url)
     
     if requested_type:
+        print(f"[LEASE] Worker {worker_id} ({client_ip}) requesting job_type='{requested_type}'", flush=True)
         target_types = []
         if os.path.exists(QUEUED_DIR):
             for d in os.listdir(QUEUED_DIR):
@@ -106,6 +109,9 @@ async def lease_job(request: Request, user=Depends(require_user)):
                     if d == requested_type or d.startswith(requested_type + "."):
                         target_types.append(d)
         print(f"[MASTER DEBUG] Requested type '{requested_type}' matched dirs: {target_types}", flush=True)
+        if not target_types:
+            print(f"[LEASE] WARNING: No queued dirs match requested_type='{requested_type}'. "
+                  f"Available queued dirs: {os.listdir(QUEUED_DIR) if os.path.exists(QUEUED_DIR) else []}", flush=True)
     else:
         target_types = [d for d in os.listdir(QUEUED_DIR) if os.path.isdir(os.path.join(QUEUED_DIR, d))] if os.path.exists(QUEUED_DIR) else []
     
@@ -123,12 +129,28 @@ async def lease_job(request: Request, user=Depends(require_user)):
     while time.time() - start_time < timeout:
         for sjt in target_types:
             qdir = os.path.join(QUEUED_DIR, sjt)
-            if not os.path.exists(qdir): continue
+            if not os.path.exists(qdir):
+                print(f"[LEASE] Queued dir does not exist: {qdir}", flush=True)
+                continue
             
             limits = get_limits_for_type(sjt, config)
             active_count = count_active_jobs_for_type(sjt)
+            queued_files = [f for f in os.listdir(qdir) if f.endswith('.json')] if os.path.exists(qdir) else []
+            print(
+                f"[LEASE] Checking type='{sjt}': "
+                f"queued={len(queued_files)}, "
+                f"active={active_count}, "
+                f"max_global={limits['max_global']}, "
+                f"max_per_instance={limits['max_per_instance']}, "
+                f"worker={worker_id}",
+                flush=True
+            )
             if active_count >= limits["max_global"]:
-                print(f"[MASTER DEBUG] Global limit reached for {sjt}: {active_count}/{limits['max_global']}")
+                print(
+                    f"[LEASE] SKIP type='{sjt}': global limit reached "
+                    f"({active_count}/{limits['max_global']} active)",
+                    flush=True
+                )
                 continue
             
             try:
@@ -161,6 +183,12 @@ async def lease_job(request: Request, user=Depends(require_user)):
                     
                     update_worker_registry(worker_id, ip=client_ip, job_id=job_id)
                     
+                    active_after = count_active_jobs_for_type(sjt)
+                    print(
+                        f"[LEASE] LEASED job_id={job_id} type='{sjt}' to worker={worker_id} "
+                        f"(active_after={active_after}/{limits['max_global']})",
+                        flush=True
+                    )
                     return JSONResponse(job_data)
                 except FileNotFoundError:
                     continue
@@ -170,8 +198,27 @@ async def lease_job(request: Request, user=Depends(require_user)):
         
         await asyncio.sleep(poll_interval)
                 
-    print(f"[MASTER DEBUG] No jobs found after {timeout}s, returning 204")
+    print(
+        f"[LEASE] TIMEOUT: No jobs leased after {timeout}s for worker={worker_id} "
+        f"requested_type='{requested_type}' target_types={target_types}",
+        flush=True
+    )
     return JSONResponse({"status": "empty"}, status_code=204)
+
+
+@router.post("/api/jobs/cancel/{job_id}")
+async def cancel_job_on_worker(job_id: str, request: Request, user=Depends(require_user)):
+    """Called by master to cancel a job running on this worker."""
+    try:
+        data = await request.json()
+        username = data.get("username", "system")
+        print(f"[CANCEL] Master requested cancel for job {job_id} (user={username})")
+        await cancel_active_job_task(job_id, username)
+        return JSONResponse({"status": "ok", "job_id": job_id})
+    except Exception as e:
+        print(f"[CANCEL] Error cancelling job {job_id} on worker: {e}")
+        return JSONResponse({"error": str(e)}, status_code=500)
+
 
 @router.post("/api/jobs/report/{job_id}")
 async def report_job(job_id: str, request: Request, user=Depends(require_user)):

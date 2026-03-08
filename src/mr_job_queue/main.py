@@ -175,7 +175,7 @@ def save_workers_registry(registry):
     with open(WORKERS_REGISTRY_PATH, 'w') as f:
         json.dump(registry, f, indent=2)
 
-def update_worker_registry(worker_id, ip=None, job_id=None, remove_job=False):
+def update_worker_registry(worker_id, ip=None, job_id=None, remove_job=False, worker_url=None):
     """Update worker info in the registry."""
     registry = load_workers_registry()
     
@@ -190,6 +190,8 @@ def update_worker_registry(worker_id, ip=None, job_id=None, remove_job=False):
     registry[worker_id]["last_seen"] = datetime.now().isoformat()
     if ip:
         registry[worker_id]["ip"] = ip
+    if worker_url:
+        registry[worker_id]["worker_url"] = worker_url
     
     if job_id:
         if remove_job:
@@ -233,7 +235,7 @@ os.makedirs(PAUSED_DIR, exist_ok=True)
 worker_task = None
 worker_running = asyncio.Event() # Use Event for clearer start/stop signaling
 semaphore = None
-active_job_tasks = set()
+active_job_tasks = {}  # job_id -> asyncio.Task
 # Dictionary to store semaphores for each job type
 job_type_semaphores = {}
 # Dictionary to store tasks for each job type
@@ -275,6 +277,11 @@ async def add_job(instructions, agent_name, job_type=None, username=None, metada
             try:
                 async with httpx.AsyncClient(timeout=30, headers=headers) as client:
                     # POST to master's /api/jobs/json endpoint (JSON payload)
+                    print(
+                        f"[WORKER->MASTER] Forwarding job to master: job_id={job_id or '(auto)'} "
+                        f"job_type='{job_type}' agent='{agent_name}' username='{username}'",
+                        flush=True
+                    )
                     resp = await client.post(f"{master_url}/api/jobs/json", json=payload)
                     
                     if resp.status_code == 200:
@@ -542,6 +549,37 @@ async def get_job_data_service(job_id, context=None):
     return await get_job_data(job_id)
 
 # ---------------------------------------------------------------------------
+# cancel_active_job_task - cancel a locally running job task
+# ---------------------------------------------------------------------------
+async def cancel_active_job_task(job_id, username):
+    """Cancel a locally running job task using the context cancellation mechanism."""
+    # First, signal the agent loop to stop via context flags
+    try:
+        from lib.chatcontext import get_context
+        ctx = await get_context(job_id, username)
+        if ctx:
+            ctx.data['cancel_current_turn'] = True
+            ctx.data['finished_conversation'] = True
+            if 'active_command_task' in ctx.data:
+                cmd_task = ctx.data['active_command_task']
+                if cmd_task and not cmd_task.done():
+                    cmd_task.cancel()
+            await ctx.save_context()
+    except Exception as e:
+        print(f"[CANCEL] Error setting cancel flags for job {job_id}: {e}")
+
+    # Then cancel the wrapper task (run_job_and_release)
+    task = active_job_tasks.get(job_id)
+    if task and not task.done():
+        task.cancel()
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=3.0)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            pass
+    
+    print(f"[CANCEL] Cancelled local task for job {job_id}")
+
+# ---------------------------------------------------------------------------
 # Worker implementation
 # ---------------------------------------------------------------------------
 async def run_job_and_release(job_id, job_data, sem, job_type=None):
@@ -609,12 +647,16 @@ async def worker_remote_loop(job_type, sem, config):
                 print(f"[WORKER DEBUG] Acquiring semaphore for {job_type}...", flush=True)
                 await sem.acquire()
                 print(f"[WORKER DEBUG] Semaphore acquired, sending lease request to {master_url}/api/jobs/lease", flush=True)
+
+                # Include worker_url so master can call back for cancellation
+                worker_url = config.get('worker_url', '').rstrip('/')
                 
                 # Long poll for a job from master
                 resp = await client.post(f"{master_url}/api/jobs/lease", json={
                     "job_type": job_type,
                     "worker_id": my_worker_id,
-                    "timeout": poll_timeout
+                    "timeout": poll_timeout,
+                    "worker_url": worker_url
                 })
                 
                 print(f"[WORKER DEBUG] Lease response: status={resp.status_code}", flush=True)
@@ -658,8 +700,8 @@ async def worker_remote_loop(job_type, sem, config):
                 
                 # Process and report
                 task = asyncio.create_task(run_remote_job_and_report(job_id, job_data, sem, job_type, client, master_url, my_worker_id))
-                active_job_tasks.add(task)
-                task.add_done_callback(active_job_tasks.discard)
+                active_job_tasks[job_id] = task
+                task.add_done_callback(lambda t, jid=job_id: active_job_tasks.pop(jid, None))
 
             except httpx.TimeoutException:
                 # Server didn't respond in time - just retry
@@ -739,8 +781,8 @@ async def worker_local_loop(job_type, sem, config):
                     continue
                 
                 task = asyncio.create_task(run_job_and_release(job_id, job_data, sem, job_type))
-                active_job_tasks.add(task)
-                task.add_done_callback(active_job_tasks.discard)
+                active_job_tasks[job_id] = task
+                task.add_done_callback(lambda t, jid=job_id: active_job_tasks.pop(jid, None))
 
         except Exception as e:
             print(f"Worker loop for '{job_type}' encountered an error: {e}")
@@ -1019,7 +1061,7 @@ async def quit(context=None):
         except Exception as e:
             print(f"Error closing sync client: {e}")
     
-    all_tasks = list(job_type_tasks.values()) + list(active_job_tasks)
+    all_tasks = list(job_type_tasks.values()) + list(active_job_tasks.values())
     if all_tasks:
         print(f"Waiting for {len(all_tasks)} active tasks to complete...")
         try:
