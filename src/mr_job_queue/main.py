@@ -943,8 +943,15 @@ async def start_job_type_workers():
         limits = config.get("limits", {})
         job_types_to_poll = list(limits.keys())
         print(f"[DEBUG] Worker mode: will poll for job types from config: {job_types_to_poll}", flush=True)
+        # Consolidate subtypes by base prefix to avoid redundant lease pollers.
+        # e.g. ['default', 'default.mr_gemini__fast', 'default.mr_gemini__slow'] -> ['default']
+        base_prefixes = set()
         for job_type in job_types_to_poll:
-            await ensure_job_type_worker_running(job_type)
+            base = job_type.split(".")[0]
+            base_prefixes.add(base)
+        print(f"[DEBUG] Worker mode: consolidated to base prefixes: {sorted(base_prefixes)}", flush=True)
+        for base in sorted(base_prefixes):
+            await ensure_job_type_worker_running(base)
         return
     
     # In master/standalone mode, start workers for queued jobs

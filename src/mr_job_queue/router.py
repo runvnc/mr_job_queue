@@ -297,7 +297,8 @@ async def sync_chatlog(request: Request, user=Depends(require_user)):
                         {"error": "Missing required field: agent (required for message)"},
                         status_code=400
                     )
-                chatlog = ChatLog(
+                chatlog = await asyncio.to_thread(
+                    ChatLog,
                     log_id=log_id,
                     user=username,
                     agent=agent,
@@ -305,7 +306,7 @@ async def sync_chatlog(request: Request, user=Depends(require_user)):
                 )
                 
                 chatlog._add_message_impl(message)
-                chatlog._save_log_sync()
+                await chatlog._save_log_async()
             
             if context_data:
                 context_dir = os.environ.get('CHATCONTEXT_DIR', 'data/context')
