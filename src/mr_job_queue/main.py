@@ -246,6 +246,22 @@ job_completion_results = {}  # job_id -> result data
 # Stale job cleanup task
 stale_cleanup_task = None
 
+# ---------------------------------------------------------------------------
+# Job availability notification events (keyed by base job type prefix)
+# ---------------------------------------------------------------------------
+_job_events = {}  # base_prefix -> asyncio.Event
+
+def _get_job_event(base_prefix):
+    """Get or create an asyncio.Event for a job type base prefix."""
+    if base_prefix not in _job_events:
+        _job_events[base_prefix] = asyncio.Event()
+    return _job_events[base_prefix]
+
+def _notify_job_available(job_type):
+    """Signal that a job is available for the given job type."""
+    base = job_type.split('.')[0]
+    _get_job_event(base).set()
+
 
 # ---------------------------------------------------------------------------
 # add_job service - creates a job file in the 'queued' directory
@@ -344,6 +360,9 @@ async def add_job(instructions, agent_name, job_type=None, username=None, metada
     # Ensure a worker for this job type is running.
     asyncio.create_task(ensure_job_type_worker_running(sjt))
     
+    # Notify any waiting lease requests
+    _notify_job_available(sjt)
+
     return {"job_id": job_id}
 
 # ---------------------------------------------------------------------------

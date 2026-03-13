@@ -26,11 +26,24 @@ from .main import add_job
 from .main import update_worker_registry, load_workers_registry
 from .main import is_queue_paused, set_queue_paused
 from .main import cancel_active_job_task
+from .main import _get_job_event
 
 # Import ChatLog for sync endpoint
 from lib.chatlog import ChatLog
 
 router = APIRouter()
+
+def _check_has_queued_jobs(target_types):
+    """Check if any of the target job type dirs have queued jobs."""
+    for sjt in target_types:
+        qdir = os.path.join(QUEUED_DIR, sjt)
+        if os.path.exists(qdir):
+            try:
+                if any(f.endswith('.json') for f in os.listdir(qdir)):
+                    return True
+            except OSError:
+                pass
+    return False
 
 def get_client_ip(request: Request) -> str:
     """Extract client IP, handling reverse proxies."""
@@ -96,7 +109,7 @@ async def lease_job(request: Request, user=Depends(require_user)):
     
     if is_queue_paused():
         print(f"[MASTER DEBUG] Queue is paused, returning 204")
-        return JSONResponse({"status": "paused"}, status_code=204)
+        return Response(status_code=204)
     
     update_worker_registry(worker_id, ip=client_ip, worker_url=worker_url)
     
@@ -121,89 +134,81 @@ async def lease_job(request: Request, user=Depends(require_user)):
         print(f"[MASTER DEBUG] No matching job type directories found, waiting {timeout}s...", flush=True)
         await asyncio.sleep(timeout)
         print(f"[MASTER DEBUG] No jobs found after {timeout}s, returning 204")
-        return JSONResponse({"status": "empty"}, status_code=204)
+        return Response(status_code=204)
 
+    base_prefix = requested_type.split(".")[0] if requested_type else None
     start_time = time.time()
-    poll_interval = 2
-    
-    while time.time() - start_time < timeout:
+
+    while True:
+        remaining = timeout - (time.time() - start_time)
+        if remaining <= 0:
+            break
+
+        if base_prefix:
+            event = _get_job_event(base_prefix)
+            try:
+                await asyncio.wait_for(event.wait(), timeout=remaining)
+            except asyncio.TimeoutError:
+                break
+        else:
+            await asyncio.sleep(min(remaining, 2))
+
+        # Try to lease a job
         for sjt in target_types:
             qdir = os.path.join(QUEUED_DIR, sjt)
             if not os.path.exists(qdir):
-                print(f"[LEASE] Queued dir does not exist: {qdir}", flush=True)
                 continue
-            
             limits = get_limits_for_type(sjt, config)
             active_count = count_active_jobs_for_type(sjt)
-            queued_files = [f for f in os.listdir(qdir) if f.endswith('.json')] if os.path.exists(qdir) else []
+            queued_files = [f for f in os.listdir(qdir) if f.endswith(".json")]
             print(
-                f"[LEASE] Checking type='{sjt}': "
-                f"queued={len(queued_files)}, "
-                f"active={active_count}, "
-                f"max_global={limits['max_global']}, "
-                f"max_per_instance={limits['max_per_instance']}, "
-                f"worker={worker_id}",
+                f"[LEASE] Checking type='{sjt}': queued={len(queued_files)}, active={active_count}, "
+                f"max_global={limits['max_global']}, worker={worker_id}",
                 flush=True
             )
             if active_count >= limits["max_global"]:
-                print(
-                    f"[LEASE] SKIP type='{sjt}': global limit reached "
-                    f"({active_count}/{limits['max_global']} active)",
-                    flush=True
-                )
+                print(f"[LEASE] SKIP type='{sjt}': global limit reached ({active_count}/{limits['max_global']})", flush=True)
                 continue
-            
             try:
                 files = sorted(os.listdir(qdir))
             except OSError:
                 continue
-                
             for f in files:
-                if not f.endswith(".json"): continue
-                
+                if not f.endswith(".json"):
+                    continue
                 job_id = f.replace(".json", "")
                 old_path = os.path.join(qdir, f)
                 new_dir = os.path.join(ACTIVE_DIR, sjt)
                 os.makedirs(new_dir, exist_ok=True)
                 new_path = os.path.join(new_dir, f)
-                
                 try:
                     os.rename(old_path, new_path)
-                    
                     async with aiofiles.open(new_path, "r") as jf:
                         job_data = json.loads(await jf.read())
-                    
                     job_data["assigned_worker"] = worker_id
                     job_data["assigned_worker_ip"] = client_ip
                     job_data["assigned_at"] = datetime.now().isoformat()
-                    
                     print(f"[MASTER DEBUG] Leasing job {job_id} to worker {worker_id}")
                     async with aiofiles.open(new_path, "w") as jf:
                         await jf.write(json.dumps(job_data, indent=2))
-                    
                     update_worker_registry(worker_id, ip=client_ip, job_id=job_id)
-                    
                     active_after = count_active_jobs_for_type(sjt)
-                    print(
-                        f"[LEASE] LEASED job_id={job_id} type='{sjt}' to worker={worker_id} "
-                        f"(active_after={active_after}/{limits['max_global']})",
-                        flush=True
-                    )
+                    print(f"[LEASE] LEASED job_id={job_id} type='{sjt}' to worker={worker_id} (active_after={active_after}/{limits['max_global']})", flush=True)
+                    if base_prefix and not _check_has_queued_jobs(target_types):
+                        _get_job_event(base_prefix).clear()
                     return JSONResponse(job_data)
                 except FileNotFoundError:
                     continue
                 except Exception as e:
                     print(f"Lease error: {e}")
                     continue
-        
-        await asyncio.sleep(poll_interval)
-                
-    print(
-        f"[LEASE] TIMEOUT: No jobs leased after {timeout}s for worker={worker_id} "
-        f"requested_type='{requested_type}' target_types={target_types}",
-        flush=True
-    )
-    return JSONResponse({"status": "empty"}, status_code=204)
+
+        # No job leased - clear event if queue is empty
+        if base_prefix and not _check_has_queued_jobs(target_types):
+            _get_job_event(base_prefix).clear()
+
+    print(f"[LEASE] TIMEOUT: No jobs leased after {timeout}s for worker={worker_id} requested_type='{requested_type}'", flush=True)
+    return Response(status_code=204)
 
 
 @router.post("/api/jobs/cancel/{job_id}")
