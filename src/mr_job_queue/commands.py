@@ -302,7 +302,30 @@ async def _scan_jobs_from_filesystem(status=None, job_type=None, username=None, 
 # submit_job – thin wrapper around service_manager.add_job
 # ---------------------------------------------------------------------------
 @command()
-async def submit_job(instructions, agent_name, job_type=None, job_id=None, metadata=None, context=None):
+async def submit_job(instructions: str, agent_name: str, job_type: str = None, job_id: str = None, metadata: dict = None, context=None):
+    """Submit a job to the job queue for asynchronous processing by an agent.
+    
+    Unlike delegate_task which runs immediately, this queues the job for
+    processing by a job queue worker, respecting rate limits and concurrency.
+    
+    Parameters:
+        instructions: The task instructions for the agent
+        agent_name: Name of the agent to run the task
+        job_type: Optional job type for queue organization (default: "default")
+        job_id: Optional custom job ID (auto-generated if not provided)
+        metadata: Optional dict of metadata to attach to the job
+    
+    Returns:
+        Dict with job_id and status, or error message
+    
+    Example:
+    
+    { "submit_job": { 
+        "instructions": "Analyze this document and summarize key points",
+        "agent_name": "analyst",
+        "job_type": "analysis"
+    }}
+    """
     result = await service_manager.add_job(
         instructions=instructions,
         agent_name=agent_name,
