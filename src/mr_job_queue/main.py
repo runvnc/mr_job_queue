@@ -234,6 +234,23 @@ os.makedirs(PAUSED_DIR, exist_ok=True)
 # Worker process state
 worker_task = None
 worker_running = asyncio.Event() # Use Event for clearer start/stop signaling
+# ---------------------------------------------------------------------------
+# Shared runtime diagnostic log (same file as mr_sip delegate_call_job trace)
+# so a single job can be followed across both plugins. Disable with
+# MR_SIP_DELEGATE_DEBUG=0. Never raises.
+# ---------------------------------------------------------------------------
+def _dbg(tag, **fields):
+    if os.getenv('MR_SIP_DELEGATE_DEBUG', '1') in ('0', 'false', 'False', ''):
+        return
+    try:
+        from datetime import datetime as _dt
+        ts = _dt.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+        parts = ' '.join(f'{k}={v!r}' for k, v in fields.items())
+        with open(os.getenv('MR_SIP_DELEGATE_DEBUG_LOG', '/tmp/delegate_call_debug.log'), 'a') as f:
+            f.write(f'{ts} pid={os.getpid()} [JOBQ] {tag} {parts}\n')
+    except Exception:
+        pass
+
 semaphore = None
 active_job_tasks = {}  # job_id -> asyncio.Task
 # Dictionary to store semaphores for each job type
@@ -363,6 +380,8 @@ async def add_job(instructions, agent_name, job_type=None, username=None, metada
     # Notify any waiting lease requests
     _notify_job_available(sjt)
 
+    _dbg('JOBQ_ADD', job_id=job_id, job_type=sjt, agent=agent_name, username=username,
+         phone=(metadata or {}).get('phone_number'), parent_log=(metadata or {}).get('parent_log_id'))
     return {"job_id": job_id}
 
 # ---------------------------------------------------------------------------
@@ -377,6 +396,7 @@ async def execute_job_core(job_id, job_data):
         job_data["updated_at"] = datetime.now().isoformat()
 
         print(f"Running task for job {job_id} with agent {job_data['agent_name']}")
+        _dbg('JOBQ_RUNTASK_BEGIN', job_id=job_id, agent=job_data.get('agent_name'))
         if not hasattr(service_manager, 'run_task'):
              raise RuntimeError("run_task service is not available via service_manager")
         
@@ -449,7 +469,16 @@ async def process_job(job_id, job_data, job_type=None):
     active_path = f"{ACTIVE_DIR}/{sjt}/{job_id}.json"
     
     try:
-        # Initial update to active
+        # Mark the job active ON DISK before running it. execute_job_core only
+        # set status='active' in-memory, so get_job_data() reported the job as
+        # 'queued' for its entire run and only ever flipped to 'completed' at the
+        # end. Callers that poll status (e.g. mr_sip delegate_call_job) therefore
+        # never saw 'active' for long/stuck calls and falsely concluded the job
+        # "did not start", triggering spurious duplicate retries.
+        job_data["status"] = "active"
+        job_data["started_at"] = datetime.now().isoformat()
+        job_data["updated_at"] = datetime.now().isoformat()
+        _dbg('JOBQ_PROCESS_START', job_id=job_id, job_type=sjt, agent=job_data.get('agent_name'))
         async with FileLock(active_path):
             async with aiofiles.open(active_path, "w") as f:
                 await f.write(json.dumps(job_data, indent=2))
@@ -459,6 +488,8 @@ async def process_job(job_id, job_data, job_type=None):
         
         # Handle state transition on filesystem
         status = job_data.get("status")
+        _dbg('JOBQ_PROCESS_DONE', job_id=job_id, final_status=status,
+             has_result=bool(job_data.get('result')), error=job_data.get('error'))
         if status == "paused":
             target_dir = PAUSED_DIR
         elif status == "completed":
@@ -611,6 +642,7 @@ async def run_job_and_release(job_id, job_data, sem, job_type=None):
         print(f"Exception in run_job_and_release for {job_id}: {e}")
     finally:
         print(f"Releasing semaphore for job {job_id}")
+        _dbg('JOBQ_RELEASE', job_id=job_id)
         sem.release()
 
 async def job_type_worker_loop(job_type):
@@ -788,6 +820,7 @@ async def worker_local_loop(job_type, sem, config):
                 await aiofiles.os.makedirs(active_job_type_dir, exist_ok=True)
                 await aiofiles.os.rename(job_path, active_path)
                 print(f"Moved {job_id} to active directory for type {job_type}")
+                _dbg('JOBQ_LEASE', job_id=job_id, job_type=job_type)
                 
                 job_data = await get_job_data(job_id)
                 if not job_data:
