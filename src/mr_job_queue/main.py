@@ -11,6 +11,8 @@ import aiofiles
 import aiofiles.os
 import httpx
 import hashlib
+import logging
+from logging.handlers import RotatingFileHandler
 
 from lib.providers.services import service, service_manager
 from lib.providers.hooks import hook_manager
@@ -235,21 +237,57 @@ os.makedirs(PAUSED_DIR, exist_ok=True)
 worker_task = None
 worker_running = asyncio.Event() # Use Event for clearer start/stop signaling
 # ---------------------------------------------------------------------------
-# Shared runtime diagnostic log (same file as mr_sip delegate_call_job trace)
-# so a single job can be followed across both plugins. Disable with
-# MR_SIP_DELEGATE_DEBUG=0. Never raises.
+# Focused queue/delegate diagnostic channel. This is intentionally independent
+# of MR_DEBUG, so MR_DEBUG=errors can keep RTP/audio logging quiet while queue
+# lifecycle records remain available. It is event-level only (never per-frame)
+# and rotates to prevent an unbounded /tmp file.
 # ---------------------------------------------------------------------------
+_LOCKUP_DEBUG_ENABLED = os.getenv(
+    'MR_JOB_QUEUE_DIAGNOSTICS', os.getenv('MR_SIP_DELEGATE_DEBUG', '1')
+).lower() not in ('0', 'false', 'no', 'off', '')
+_LOCKUP_DEBUG_LOG = os.getenv(
+    'MR_JOB_QUEUE_DIAGNOSTICS_LOG',
+    os.getenv('MR_SIP_DELEGATE_DEBUG_LOG', '/tmp/job_queue_diagnostics.log')
+)
+_LOCKUP_DEBUG_MAX_BYTES = int(os.getenv('MR_JOB_QUEUE_DIAGNOSTICS_MAX_BYTES', '5242880'))
+_LOCKUP_DEBUG_BACKUPS = int(os.getenv('MR_JOB_QUEUE_DIAGNOSTICS_BACKUPS', '3'))
+_lockup_logger = logging.getLogger('mr_job_queue.lockup')
+_lockup_logger.setLevel(logging.INFO)
+_lockup_logger.propagate = False
+if _LOCKUP_DEBUG_ENABLED and not _lockup_logger.handlers:
+    try:
+        _handler = RotatingFileHandler(
+            _LOCKUP_DEBUG_LOG,
+            maxBytes=_LOCKUP_DEBUG_MAX_BYTES,
+            backupCount=_LOCKUP_DEBUG_BACKUPS,
+        )
+        _handler.setFormatter(logging.Formatter('%(asctime)s %(message)s', '%Y-%m-%d %H:%M:%S'))
+        _lockup_logger.addHandler(_handler)
+    except Exception:
+        _LOCKUP_DEBUG_ENABLED = False
+
 def _dbg(tag, **fields):
-    if os.getenv('MR_SIP_DELEGATE_DEBUG', '1') in ('0', 'false', 'False', ''):
+    if not _LOCKUP_DEBUG_ENABLED:
         return
     try:
-        from datetime import datetime as _dt
-        ts = _dt.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
         parts = ' '.join(f'{k}={v!r}' for k, v in fields.items())
-        with open(os.getenv('MR_SIP_DELEGATE_DEBUG_LOG', '/tmp/delegate_call_debug.log'), 'a') as f:
-            f.write(f'{ts} pid={os.getpid()} [JOBQ] {tag} {parts}\n')
+        _lockup_logger.info('pid=%s [JOBQ] %s %s', os.getpid(), tag, parts)
     except Exception:
         pass
+
+def _task_snapshot(task):
+    if task is None:
+        return {'task': None}
+    try:
+        coro = task.get_coro()
+        return {
+            'done': task.done(),
+            'cancelled': task.cancelled(),
+            'coro': getattr(coro, '__qualname__', repr(coro)),
+            'stack': [f'{frame.f_code.co_filename}:{frame.f_lineno}:{frame.f_code.co_name}' for frame in task.get_stack(limit=8)],
+        }
+    except Exception as exc:
+        return {'snapshot_error': repr(exc)}
 
 semaphore = None
 active_job_tasks = {}  # job_id -> asyncio.Task
@@ -396,7 +434,7 @@ async def execute_job_core(job_id, job_data):
         job_data["updated_at"] = datetime.now().isoformat()
 
         print(f"Running task for job {job_id} with agent {job_data['agent_name']}")
-        _dbg('JOBQ_RUNTASK_BEGIN', job_id=job_id, agent=job_data.get('agent_name'))
+        _dbg('JOBQ_RUNTASK_BEGIN', job_id=job_id, agent=job_data.get('agent_name'), task=_task_snapshot(asyncio.current_task()))
         if not hasattr(service_manager, 'run_task'):
              raise RuntimeError("run_task service is not available via service_manager")
         
@@ -448,7 +486,11 @@ async def execute_job_core(job_id, job_data):
         })
         return job_data
         
+    except asyncio.CancelledError:
+        _dbg('JOBQ_RUNTASK_CANCELLED', job_id=job_id, task=_task_snapshot(asyncio.current_task()))
+        raise
     except Exception as e:
+        _dbg('JOBQ_RUNTASK_ERROR', job_id=job_id, error=repr(e), task=_task_snapshot(asyncio.current_task()))
         print(f"Error processing job {job_id}: {e}\n{traceback.format_exc()}")
         job_data.update({
             "status": "failed",
@@ -517,7 +559,11 @@ async def process_job(job_id, job_data, job_type=None):
         if job_id in job_completion_events:
             job_completion_results[job_id] = job_data
             job_completion_events[job_id].set()
+    except asyncio.CancelledError:
+        _dbg('JOBQ_PROCESS_CANCELLED', job_id=job_id, task=_task_snapshot(asyncio.current_task()))
+        raise
     except Exception as e:
+        _dbg('JOBQ_PROCESS_ERROR', job_id=job_id, error=repr(e), task=_task_snapshot(asyncio.current_task()))
         print(f"Error in process_job for {job_id}: {e}")
         return False
 
@@ -638,12 +684,17 @@ async def run_job_and_release(job_id, job_data, sem, job_type=None):
         print(f"Starting processing for job {job_id}")
         await process_job(job_id, job_data, job_type=job_type)
         print(f"Finished processing job {job_id}")
+    except asyncio.CancelledError:
+        _dbg('JOBQ_WRAPPER_CANCELLED', job_id=job_id, task=_task_snapshot(asyncio.current_task()))
+        raise
     except Exception as e:
+        _dbg('JOBQ_WRAPPER_ERROR', job_id=job_id, error=repr(e), task=_task_snapshot(asyncio.current_task()))
         print(f"Exception in run_job_and_release for {job_id}: {e}")
     finally:
         print(f"Releasing semaphore for job {job_id}")
-        _dbg('JOBQ_RELEASE', job_id=job_id)
+        _dbg('JOBQ_RELEASE', job_id=job_id, sem_value_before=getattr(sem, '_value', None))
         sem.release()
+        _dbg('JOBQ_RELEASED', job_id=job_id, sem_value_after=getattr(sem, '_value', None))
 
 async def job_type_worker_loop(job_type):
     """Worker loop for a specific job type."""
@@ -799,7 +850,9 @@ async def worker_local_loop(job_type, sem, config):
                 job_id = job_file.replace(".json", "")
                 
                 print(f"Attempting to acquire semaphore for job {job_id}...")
+                _dbg('JOBQ_SEM_WAIT', job_id=job_id, job_type=job_type, sem_value=getattr(sem, '_value', None), active_tasks=len(active_job_tasks))
                 await sem.acquire()
+                _dbg('JOBQ_SEM_ACQUIRED', job_id=job_id, job_type=job_type, sem_value=getattr(sem, '_value', None), active_tasks=len(active_job_tasks))
                 print(f"Semaphore acquired for job {job_id}")
                 
                 # In master mode, also check global limit before processing
@@ -884,10 +937,13 @@ async def cleanup_stale_jobs():
     """Periodically check for stale jobs and move them back to queued. Uses worker registry to detect dead workers."""
     config = load_config()
     timeout_minutes = config.get("stale_job_timeout_minutes", 60)
+    diagnostic_after = float(os.getenv('MR_JOB_QUEUE_DIAGNOSTIC_AFTER_SECONDS', '180'))
+    diagnostic_interval = float(os.getenv('MR_JOB_QUEUE_DIAGNOSTIC_INTERVAL_SECONDS', '60'))
+    last_diagnostic = {}
     
     while worker_running.is_set():
         try:
-            await asyncio.sleep(300)  # Check every 5 minutes
+            await asyncio.sleep(max(10.0, diagnostic_interval))
             
             config = load_config()  # Reload in case it changed
             timeout_minutes = config.get("stale_job_timeout_minutes", 60)
@@ -935,13 +991,33 @@ async def cleanup_stale_jobs():
                             worker_is_dead = True
                             print(f"Worker {assigned_worker} not in registry")
                         
-                        # Check time-based staleness as fallback
+                        # Check time-based staleness as fallback and emit a
+                        # non-destructive task snapshot well before requeueing.
                         time_is_stale = False
                         started_at = job_data.get("started_at") or job_data.get("assigned_at")
+                        age_seconds = None
                         if started_at:
                             started = datetime.fromisoformat(started_at)
-                            if (now - started).total_seconds() > timeout_minutes * 60:
+                            age_seconds = (now - started).total_seconds()
+                            if age_seconds > timeout_minutes * 60:
                                 time_is_stale = True
+                        job_id = job_data.get('id') or job_file[:-5]
+                        if age_seconds is not None and age_seconds >= diagnostic_after:
+                            last = last_diagnostic.get(job_id, 0.0)
+                            if time.time() - last >= diagnostic_interval:
+                                task = active_job_tasks.get(job_id)
+                                _dbg(
+                                    'JOBQ_ACTIVE_SNAPSHOT',
+                                    job_id=job_id,
+                                    job_type=job_type_dir,
+                                    age_seconds=round(age_seconds, 1),
+                                    assigned_worker=assigned_worker,
+                                    task_present=bool(task),
+                                    task=_task_snapshot(task),
+                                    sem_value=getattr(job_type_semaphores.get(job_type_dir), '_value', None),
+                                    active_tasks=list(active_job_tasks.keys()),
+                                )
+                                last_diagnostic[job_id] = time.time()
                         
                         # Requeue if worker is dead OR job is time-stale
                         if worker_is_dead or time_is_stale:
@@ -1051,10 +1127,10 @@ async def message_added(log_id, user, agent, message, parent_log_id=None, contex
     its local copy of the chat log.
     """
     global _sync_client
-    #print large colorful header for log
-    print("\n" + "="*10 + " CHATLOG SYNC HOOK TRIGGERED " + "="*10)
-    print("[CHATLOG SYNC] message_added hook triggered")
     config = load_config()
+    if os.getenv('MR_JOB_QUEUE_CHAT_SYNC_DEBUG', '0').lower() in ('1', 'true', 'yes', 'debug'):
+        print("\n" + "="*10 + " CHATLOG SYNC HOOK TRIGGERED " + "="*10)
+        print("[CHATLOG SYNC] message_added hook triggered")
     if config.get("mode") != "worker":
         return  # Only sync in worker mode
     
