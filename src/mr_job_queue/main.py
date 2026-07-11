@@ -266,12 +266,22 @@ if _LOCKUP_DEBUG_ENABLED and not _lockup_logger.handlers:
     except Exception:
         _LOCKUP_DEBUG_ENABLED = False
 
+def _emit_diagnostic(logger, message, *args):
+    """Emit to this logger's handlers despite a process-wide logging.disable floor."""
+    record = logger.makeRecord(
+        logger.name, logging.INFO, __file__, 0, message, args, None
+    )
+    logger.handle(record)
+
+
 def _dbg(tag, **fields):
     if not _LOCKUP_DEBUG_ENABLED:
         return
     try:
         parts = ' '.join(f'{k}={v!r}' for k, v in fields.items())
-        _lockup_logger.info('pid=%s [JOBQ] %s %s', os.getpid(), tag, parts)
+        _emit_diagnostic(
+            _lockup_logger, 'pid=%s [JOBQ] %s %s', os.getpid(), tag, parts
+        )
     except Exception:
         pass
 
