@@ -303,6 +303,8 @@ semaphore = None
 active_job_tasks = {}  # job_id -> asyncio.Task
 # Dictionary to store semaphores for each job type
 job_type_semaphores = {}
+# Configured capacity is not Semaphore._value, which falls while permits are held.
+job_type_semaphore_capacities = {}
 # Dictionary to store tasks for each job type
 job_type_tasks = {}
 # Completion notification for jobs being waited on
@@ -710,8 +712,21 @@ async def job_type_worker_loop(job_type):
     """Worker loop for a specific job type."""
     config = load_config()
     limits = get_limits_for_type(job_type, config)
-    if job_type not in job_type_semaphores or job_type_semaphores[job_type]._value != limits["max_per_instance"]:
-        job_type_semaphores[job_type] = asyncio.Semaphore(limits["max_per_instance"])
+    configured_capacity = limits["max_per_instance"]
+    if job_type not in job_type_semaphores:
+        job_type_semaphores[job_type] = asyncio.Semaphore(configured_capacity)
+        job_type_semaphore_capacities[job_type] = configured_capacity
+    elif job_type_semaphore_capacities.get(job_type) != configured_capacity:
+        # Never replace a semaphore merely because permits are currently held.
+        # A live worker owns this semaphore for its lifetime; applying a changed
+        # capacity safely requires restarting that worker (or the process).
+        _dbg(
+            'JOBQ_SEM_CAPACITY_CHANGE_DEFERRED',
+            job_type=job_type,
+            configured_capacity=configured_capacity,
+            active_capacity=job_type_semaphore_capacities.get(job_type),
+            sem_value=getattr(job_type_semaphores[job_type], '_value', None),
+        )
     sem = job_type_semaphores[job_type]
     
     config = load_config()
@@ -1033,6 +1048,53 @@ async def cleanup_stale_jobs():
                         if worker_is_dead or time_is_stale:
                             reason = "worker dead" if worker_is_dead else "time stale"
                             print(f"Stale job detected: {job_file} (reason: {reason}, started: {started_at})")
+                            local_task = active_job_tasks.get(job_id)
+                            if local_task is not None and not local_task.done():
+                                # Never duplicate a job that is demonstrably
+                                # still executing in this process.
+                                _dbg(
+                                    'JOBQ_STALE_SKIP_LIVE_LOCAL',
+                                    job_id=job_id,
+                                    job_type=job_type_dir,
+                                    reason=reason,
+                                    age_seconds=round(age_seconds, 1) if age_seconds is not None else None,
+                                    task=_task_snapshot(local_task),
+                                )
+                                continue
+
+                            original_job_type = str(job_data.get('job_type') or job_type_dir)
+                            is_call_job = original_job_type == 'call' or original_job_type.startswith('call.')
+                            if is_call_job:
+                                # Re-running a stale voice job can place a
+                                # second real call. Make it terminal instead.
+                                job_data.update({
+                                    "status": "failed",
+                                    "error": f"Stale call job was not automatically retried ({reason})",
+                                    "completed_at": datetime.now().isoformat(),
+                                    "updated_at": datetime.now().isoformat(),
+                                })
+                                job_data.pop("assigned_worker", None)
+                                job_data.pop("assigned_worker_ip", None)
+                                job_data.pop("assigned_at", None)
+                                failed_path = os.path.join(FAILED_DIR, job_type_dir, job_file)
+                                os.makedirs(os.path.dirname(failed_path), exist_ok=True)
+                                async with aiofiles.open(failed_path, 'w') as f:
+                                    await f.write(json.dumps(job_data, indent=2))
+                                os.remove(job_path)
+                                _dbg(
+                                    'JOBQ_STALE_CALL_FAILED',
+                                    job_id=job_id,
+                                    job_type=job_type_dir,
+                                    reason=reason,
+                                    age_seconds=round(age_seconds, 1) if age_seconds is not None else None,
+                                )
+                                event = job_completion_events.get(job_id)
+                                if event:
+                                    job_completion_results[job_id] = job_data
+                                    event.set()
+                                print(f"Moved stale call job {job_file} to failed; automatic redial suppressed")
+                                continue
+
                             # Clear worker assignment before requeuing
                             job_data.pop("assigned_worker", None)
                             job_data.pop("assigned_worker_ip", None)
